@@ -1,0 +1,17 @@
+.env
+.env.local
+.env.production
+
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+uploads/
+*.log
+*.sqlite
+*.db
