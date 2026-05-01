@@ -387,16 +387,20 @@ def create_app() -> FastAPI:
     app = FastAPI(title="FastAPI Admin (Dark)")
     app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY, session_cookie=settings.COOKIE_NAME)
 
-    # Разрешаем запросы с фронта (для разработки разрешаем все localhost origins)
+    allow_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+    if settings.FRONTEND_BASE_URL:
+        allow_origins.append(settings.FRONTEND_BASE_URL.rstrip("/"))
+
+    # Разрешаем запросы с фронта: localhost + явный FRONTEND_BASE_URL + Railway домены.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=[
-            "http://localhost:3000",
-            "http://127.0.0.1:3000",
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
-        ],
-        allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?",
+        allow_origins=allow_origins,
+        allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-zA-Z0-9-]+\.up\.railway\.app)$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
