@@ -326,12 +326,17 @@ async def azericard_callback(
     if not order_id:
         raise HTTPException(status_code=400, detail="ORDER is required")
 
-    tx = (
-        db.query(OnlineTransaction)
+    # Lock only the target row ID first to avoid PostgreSQL FOR UPDATE errors
+    # on ORM-generated outer joins.
+    tx_id_row = (
+        db.query(OnlineTransaction.id)
         .filter(OnlineTransaction.order_id == order_id)
         .with_for_update()
         .first()
     )
+    if not tx_id_row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    tx = db.get(OnlineTransaction, tx_id_row[0])
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
     if tx.payment_id:
