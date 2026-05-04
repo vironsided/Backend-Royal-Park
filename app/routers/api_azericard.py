@@ -25,6 +25,7 @@ from ..services.azericard import (
     TERMINAL_GROUP_STANDARD,
     TERMINAL_GROUP_WALLET,
     _private_key,
+    _terminal_group_from_data,
     _terminal_id_for,
     amount_to_gateway,
     build_nonce,
@@ -32,6 +33,7 @@ from ..services.azericard import (
     build_timestamp,
     classify_invoice_amounts,
     generate_p_sign,
+    terminal_group_for_online_trtype,
     verify_callback_signature,
 )
 from .api_payment_logic import apply_payment_to_invoice, apply_payment_to_invoices
@@ -63,6 +65,7 @@ class CompleteRequest(BaseModel):
 @router.get("/wallet-config")
 def wallet_config():
     merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
+    apple_mid = (settings.AZERICARD_APPLE_MERCHANT_ID or "").strip()
     return {
         "ok": True,
         "google_pay": {
@@ -74,6 +77,12 @@ def wallet_config():
             "merchantOrigin": (settings.AZERICARD_MERCH_URL or "").strip(),
             "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
             "supported": bool((settings.AZERICARD_GPAY_GATEWAY_MERCHANT_ID or "").strip()),
+        },
+        "apple_pay": {
+            "supported": bool(apple_mid),
+            "merchantIdentifier": apple_mid,
+            "merchantName": merchant_name,
+            "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
         },
     }
 
@@ -128,18 +137,6 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in accept or "*/*" in accept
 
 
-def _normalize_terminal(value: str) -> str:
-    return "".join(ch for ch in str(value or "") if ch.isdigit())
-
-
-def _resolve_group_from_callback_data(data: dict[str, str]) -> str:
-    callback_terminal = _normalize_terminal(_pick(data, "TERMINAL", "terminal"))
-    wallet_terminal = _normalize_terminal(_terminal_id_for(terminal_group=TERMINAL_GROUP_WALLET))
-    if wallet_terminal and callback_terminal and wallet_terminal == callback_terminal:
-        return TERMINAL_GROUP_WALLET
-    return TERMINAL_GROUP_STANDARD
-
-
 def _build_gateway_params(
     amount: Decimal,
     category: str,
@@ -175,11 +172,15 @@ def _build_gateway_params(
     if settings.AZERICARD_LANG:
         req["LANG"] = settings.AZERICARD_LANG
 
-    if terminal_group == TERMINAL_GROUP_WALLET and wallet_provider and wallet_token:
+    # Wallet flows: Google Pay uses GPAYTOKEN (payment token JSON). Apple Pay may use
+    # the same token field per MPI profile plus optional EXT_MPI_ECI / TAVV (see AzeriCard docs).
+    if terminal_group == TERMINAL_GROUP_WALLET and wallet_provider:
         provider = wallet_provider.strip().lower()
-        if provider == "google_pay":
+        if provider == "google_pay" and wallet_token:
             req["GPAYTOKEN"] = wallet_token
-        if provider == "apple_pay":
+        elif provider == "apple_pay":
+            if wallet_token:
+                req["GPAYTOKEN"] = wallet_token
             if wallet_eci:
                 req["EXT_MPI_ECI"] = wallet_eci
             if wallet_tavv:
@@ -311,7 +312,7 @@ async def azericard_callback(
     tx.trtype = _pick(data, "TRTYPE", "trtype") or tx.trtype
 
     category = tx.terminal_category
-    callback_group = _resolve_group_from_callback_data(data)
+    callback_group = _terminal_group_from_data(data)
     _ensure_gateway_config(category, terminal_group=callback_group)
 
     signature_ok = verify_callback_signature(data, category=category, terminal_group=callback_group)
@@ -430,9 +431,10 @@ async def get_status(order_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Order not found")
 
     category = tx.terminal_category
-    _ensure_gateway_config(category)
+    group = terminal_group_for_online_trtype(tx.trtype)
+    _ensure_gateway_config(category, terminal_group=group)
 
-    terminal_id = _terminal_id_for(category)
+    terminal_id = _terminal_id_for(category, terminal_group=group)
     payload = {
         "ORDER": tx.order_id,
         "TERMINAL": terminal_id,
@@ -440,7 +442,12 @@ async def get_status(order_id: str, db: Session = Depends(get_db)):
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
     }
-    payload["P_SIGN"] = generate_p_sign(payload, ["ORDER", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE"], category)
+    payload["P_SIGN"] = generate_p_sign(
+        payload,
+        ["ORDER", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE"],
+        category,
+        terminal_group=group,
+    )
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(settings.AZERICARD_API_URL, data=payload)
@@ -455,10 +462,13 @@ async def get_status(order_id: str, db: Session = Depends(get_db)):
 @router.post("/complete")
 async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_db)):
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == payload.order_id).first()
-    category = tx.terminal_category if tx else None
-    _ensure_gateway_config(category)
+    if not tx:
+        raise HTTPException(status_code=404, detail="Order not found")
+    category = tx.terminal_category
+    group = terminal_group_for_online_trtype(tx.trtype)
+    _ensure_gateway_config(category, terminal_group=group)
 
-    terminal_id = _terminal_id_for(category)
+    terminal_id = _terminal_id_for(category, terminal_group=group)
     req = {
         "ORDER": payload.order_id,
         "AMOUNT": amount_to_gateway(payload.amount),
@@ -470,7 +480,7 @@ async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_d
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
     }
-    req["P_SIGN"] = generate_p_sign(req, CALLBACK_SIGN_FIELDS, category)
+    req["P_SIGN"] = generate_p_sign(req, CALLBACK_SIGN_FIELDS, category, terminal_group=group)
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(settings.AZERICARD_API_URL, data=req)

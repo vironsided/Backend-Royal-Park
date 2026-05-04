@@ -54,7 +54,20 @@ class Settings(BaseModel):
     AZERICARD_PRIVATE_KEY_ADVANCE: str = os.getenv("AZERICARD_PRIVATE_KEY_ADVANCE", "")
     AZERICARD_PUBLIC_KEY_ADVANCE: str = os.getenv("AZERICARD_PUBLIC_KEY_ADVANCE", "")
 
-    # AzeriCard — dedicated wallet terminal (Apple Pay / Google Pay)
+    # AzeriCard — dedicated wallet terminals (Apple Pay / Google Pay), per business category
+    AZERICARD_TERMINAL_WALLET_UTILITY: str = os.getenv("AZERICARD_TERMINAL_WALLET_UTILITY", "")
+    AZERICARD_PRIVATE_KEY_WALLET_UTILITY: str = os.getenv("AZERICARD_PRIVATE_KEY_WALLET_UTILITY", "")
+    AZERICARD_PUBLIC_KEY_WALLET_UTILITY: str = os.getenv("AZERICARD_PUBLIC_KEY_WALLET_UTILITY", "")
+
+    AZERICARD_TERMINAL_WALLET_MAINTENANCE: str = os.getenv("AZERICARD_TERMINAL_WALLET_MAINTENANCE", "")
+    AZERICARD_PRIVATE_KEY_WALLET_MAINTENANCE: str = os.getenv("AZERICARD_PRIVATE_KEY_WALLET_MAINTENANCE", "")
+    AZERICARD_PUBLIC_KEY_WALLET_MAINTENANCE: str = os.getenv("AZERICARD_PUBLIC_KEY_WALLET_MAINTENANCE", "")
+
+    AZERICARD_TERMINAL_WALLET_ADVANCE: str = os.getenv("AZERICARD_TERMINAL_WALLET_ADVANCE", "")
+    AZERICARD_PRIVATE_KEY_WALLET_ADVANCE: str = os.getenv("AZERICARD_PRIVATE_KEY_WALLET_ADVANCE", "")
+    AZERICARD_PUBLIC_KEY_WALLET_ADVANCE: str = os.getenv("AZERICARD_PUBLIC_KEY_WALLET_ADVANCE", "")
+
+    # Legacy single wallet terminal (fallback if per-category wallet TID is empty)
     AZERICARD_TERMINAL_WALLET: str = os.getenv("AZERICARD_TERMINAL_WALLET", "")
     AZERICARD_PRIVATE_KEY_WALLET: str = os.getenv("AZERICARD_PRIVATE_KEY_WALLET", "")
     AZERICARD_PUBLIC_KEY_WALLET: str = os.getenv("AZERICARD_PUBLIC_KEY_WALLET", "")
@@ -63,6 +76,8 @@ class Settings(BaseModel):
     AZERICARD_GPAY_GATEWAY_MERCHANT_ID: str = os.getenv("AZERICARD_GPAY_GATEWAY_MERCHANT_ID", "")
     AZERICARD_GPAY_MERCHANT_ID: str = os.getenv("AZERICARD_GPAY_MERCHANT_ID", "")
     AZERICARD_GPAY_MERCHANT_NAME: str = os.getenv("AZERICARD_GPAY_MERCHANT_NAME", "")
+    # Apple Pay merchant id (e.g. merchant.com.company.app) — same value as in Xcode Apple Pay capability
+    AZERICARD_APPLE_MERCHANT_ID: str = os.getenv("AZERICARD_APPLE_MERCHANT_ID", "")
 
     # Firebase Cloud Messaging (backend)
     FIREBASE_CREDENTIALS_PATH: str = os.getenv("FIREBASE_CREDENTIALS_PATH", "")

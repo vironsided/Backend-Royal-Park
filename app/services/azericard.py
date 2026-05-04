@@ -28,6 +28,13 @@ TERMINAL_GROUP_STANDARD = "standard"
 TERMINAL_GROUP_WALLET = "wallet"
 
 
+def terminal_group_for_online_trtype(trtype: Optional[str]) -> str:
+    """Gateway wallet purchases use TRTYPE 1; status/complete must use the same terminal keys."""
+    if (trtype or "").strip() == "1":
+        return TERMINAL_GROUP_WALLET
+    return TERMINAL_GROUP_STANDARD
+
+
 # ---------------------------------------------------------------------------
 # PEM helpers
 # ---------------------------------------------------------------------------
@@ -60,9 +67,53 @@ def _normalize_terminal_id(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+def _wallet_terminal_id_for(category: Optional[str]) -> str:
+    if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_TERMINAL_WALLET_UTILITY:
+        return settings.AZERICARD_TERMINAL_WALLET_UTILITY
+    if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_TERMINAL_WALLET_MAINTENANCE:
+        return settings.AZERICARD_TERMINAL_WALLET_MAINTENANCE
+    if category == TERMINAL_CATEGORY_ADVANCE and settings.AZERICARD_TERMINAL_WALLET_ADVANCE:
+        return settings.AZERICARD_TERMINAL_WALLET_ADVANCE
+    return settings.AZERICARD_TERMINAL_WALLET
+
+
+def _wallet_private_key_raw(category: Optional[str]) -> str:
+    if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_PRIVATE_KEY_WALLET_UTILITY:
+        return settings.AZERICARD_PRIVATE_KEY_WALLET_UTILITY
+    if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_PRIVATE_KEY_WALLET_MAINTENANCE:
+        return settings.AZERICARD_PRIVATE_KEY_WALLET_MAINTENANCE
+    if category == TERMINAL_CATEGORY_ADVANCE and settings.AZERICARD_PRIVATE_KEY_WALLET_ADVANCE:
+        return settings.AZERICARD_PRIVATE_KEY_WALLET_ADVANCE
+    return settings.AZERICARD_PRIVATE_KEY_WALLET
+
+
+def _wallet_public_key_raw(category: Optional[str]) -> str:
+    if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_PUBLIC_KEY_WALLET_UTILITY:
+        return settings.AZERICARD_PUBLIC_KEY_WALLET_UTILITY
+    if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_PUBLIC_KEY_WALLET_MAINTENANCE:
+        return settings.AZERICARD_PUBLIC_KEY_WALLET_MAINTENANCE
+    if category == TERMINAL_CATEGORY_ADVANCE and settings.AZERICARD_PUBLIC_KEY_WALLET_ADVANCE:
+        return settings.AZERICARD_PUBLIC_KEY_WALLET_ADVANCE
+    return settings.AZERICARD_PUBLIC_KEY_WALLET
+
+
+def _all_wallet_terminal_ids_normalized() -> frozenset[str]:
+    ids: set[str] = set()
+    for raw in (
+        settings.AZERICARD_TERMINAL_WALLET_UTILITY,
+        settings.AZERICARD_TERMINAL_WALLET_MAINTENANCE,
+        settings.AZERICARD_TERMINAL_WALLET_ADVANCE,
+        settings.AZERICARD_TERMINAL_WALLET,
+    ):
+        n = _normalize_terminal_id(raw)
+        if n:
+            ids.add(n)
+    return frozenset(ids)
+
+
 def _terminal_id_for(category: Optional[str] = None, terminal_group: Optional[str] = None) -> str:
-    if terminal_group == TERMINAL_GROUP_WALLET and settings.AZERICARD_TERMINAL_WALLET:
-        return settings.AZERICARD_TERMINAL_WALLET
+    if terminal_group == TERMINAL_GROUP_WALLET:
+        return _wallet_terminal_id_for(category)
     if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_TERMINAL_UTILITY:
         return settings.AZERICARD_TERMINAL_UTILITY
     if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_TERMINAL_MAINTENANCE:
@@ -73,8 +124,8 @@ def _terminal_id_for(category: Optional[str] = None, terminal_group: Optional[st
 
 
 def _private_key_raw(category: Optional[str] = None, terminal_group: Optional[str] = None) -> str:
-    if terminal_group == TERMINAL_GROUP_WALLET and settings.AZERICARD_PRIVATE_KEY_WALLET:
-        return settings.AZERICARD_PRIVATE_KEY_WALLET
+    if terminal_group == TERMINAL_GROUP_WALLET:
+        return _wallet_private_key_raw(category)
     if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_PRIVATE_KEY_UTILITY:
         return settings.AZERICARD_PRIVATE_KEY_UTILITY
     if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_PRIVATE_KEY_MAINTENANCE:
@@ -85,8 +136,8 @@ def _private_key_raw(category: Optional[str] = None, terminal_group: Optional[st
 
 
 def _public_key_raw(category: Optional[str] = None, terminal_group: Optional[str] = None) -> str:
-    if terminal_group == TERMINAL_GROUP_WALLET and settings.AZERICARD_PUBLIC_KEY_WALLET:
-        return settings.AZERICARD_PUBLIC_KEY_WALLET
+    if terminal_group == TERMINAL_GROUP_WALLET:
+        return _wallet_public_key_raw(category)
     if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_PUBLIC_KEY_UTILITY:
         return settings.AZERICARD_PUBLIC_KEY_UTILITY
     if category == TERMINAL_CATEGORY_MAINTENANCE and settings.AZERICARD_PUBLIC_KEY_MAINTENANCE:
@@ -129,8 +180,7 @@ def _terminal_group_from_data(data: dict) -> str:
     callback_tid = _normalize_terminal_id(str(data.get("TERMINAL", "") or ""))
     if not callback_tid:
         return TERMINAL_GROUP_STANDARD
-    wallet_tid = _normalize_terminal_id(settings.AZERICARD_TERMINAL_WALLET)
-    if wallet_tid and callback_tid == wallet_tid:
+    if callback_tid in _all_wallet_terminal_ids_normalized():
         return TERMINAL_GROUP_WALLET
     return TERMINAL_GROUP_STANDARD
 
