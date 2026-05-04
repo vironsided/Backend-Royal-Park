@@ -187,7 +187,9 @@ def _build_gateway_params(
         # It is also the 7th field signed in P_SIGN per Azericard spec.
         "MERCH_URL": settings.AZERICARD_MERCH_URL,
         "TERMINAL": terminal_id,
-        "TRTYPE": "1" if terminal_group == TERMINAL_GROUP_WALLET else "0",
+        # Azericard test profile for this merchant accepts authorization TRTYPE=1.
+        # Using TRTYPE=0 causes gateway "Giris qadagandir" rejection on this setup.
+        "TRTYPE": "1",
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
         "BACKREF": settings.AZERICARD_CALLBACK_URL,
