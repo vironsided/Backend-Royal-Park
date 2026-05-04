@@ -18,7 +18,10 @@ from ..config import settings
 # Auth/initiation request: sign MERCH_URL as the 7th field (not BACKREF)
 CREATE_SIGN_FIELDS = ["AMOUNT", "CURRENCY", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE", "MERCH_URL"]
 # Callback / reversal / completion verification
+# Azericard callback signature format can differ by gateway flow/profile.
+# We support both known layouts to avoid false SIGNATURE_FAILED on valid callbacks.
 CALLBACK_SIGN_FIELDS = ["AMOUNT", "CURRENCY", "TERMINAL", "TRTYPE", "ORDER", "RRN", "INT_REF"]
+CALLBACK_SIGN_FIELDS_ALT = ["AMOUNT", "TERMINAL", "APPROVAL", "RRN", "INT_REF"]
 
 UTILITY_METER_TYPES = {"ELECTRIC", "GAS", "WATER", "SEWERAGE"}
 MAINTENANCE_METER_TYPES = {"SERVICE", "RENT", "CONSTRUCTION"}
@@ -223,11 +226,21 @@ def verify_callback_signature(
         return False
     try:
         signature = bytes.fromhex(signature_hex)
-        content = build_signature_content(data, CALLBACK_SIGN_FIELDS).encode("utf-8")
-        _mpi_public_key().verify(signature, content, padding.PKCS1v15(), hashes.SHA256())
-        return True
     except Exception:
         return False
+
+    verify_fields_sets = (
+        CALLBACK_SIGN_FIELDS,
+        CALLBACK_SIGN_FIELDS_ALT,
+    )
+    for fields in verify_fields_sets:
+        try:
+            content = build_signature_content(data, fields).encode("utf-8")
+            _mpi_public_key().verify(signature, content, padding.PKCS1v15(), hashes.SHA256())
+            return True
+        except Exception:
+            continue
+    return False
 
 
 # ---------------------------------------------------------------------------
