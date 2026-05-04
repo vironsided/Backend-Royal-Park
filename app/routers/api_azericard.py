@@ -370,53 +370,16 @@ async def azericard_callback(
             return RedirectResponse(url=f"/api/azericard/fail?order_id={order_id}&reason=declined", status_code=302)
         return {"ok": False, "order_id": order_id, "status": "DECLINED"}
 
-    payment = Payment(
-        resident_id=tx.resident_id,
-        received_at=now_baku(),
-        amount_total=tx.amount_total,
-        method=PaymentMethod.ONLINE,
-        reference=order_id,
-        comment=f"AzeriCard online payment ({category or 'default'})",
-        created_by_id=None,
-    )
-    db.add(payment)
-    db.flush()
-
-    tx.payment_id = payment.id
-    tx.gateway_status = "CONFIRMED"
-
-    applied_amount = Decimal("0")
-    if tx.invoice_id:
-        applied_amount = apply_payment_to_invoice(
-            db=db,
-            payment_id=payment.id,
-            invoice_id=tx.invoice_id,
-            reference=f"AZERICARD:{order_id}",
-        )
-    apply_payment_to_invoices(
+    payment_id = _confirm_local_transaction_from_callback(
         db=db,
-        payment_id=payment.id,
-        resident_id=tx.resident_id,
-        scope="all",
-    )
-
-    # Extract and save card token if present in callback data
-    _try_save_card_token(db, tx, data)
-
-    db.add(
-        PaymentLog(
-            payment_id=payment.id,
-            resident_id=tx.resident_id,
-            user_id=None,
-            action="GATEWAY_CALLBACK",
-            amount=float(tx.amount_total or 0),
-            details=f"AzeriCard confirmed ORDER={order_id} [{category}]; invoice_applied={float(applied_amount)}",
-        )
+        tx=tx,
+        callback_data=data,
+        log_action="GATEWAY_CALLBACK",
     )
     db.commit()
     if _wants_html(request):
         return RedirectResponse(url=f"/api/azericard/success?order_id={order_id}", status_code=302)
-    return {"ok": True, "order_id": order_id, "payment_id": payment.id}
+    return {"ok": True, "order_id": order_id, "payment_id": payment_id}
 
 
 def _try_save_card_token(db: Session, tx: OnlineTransaction, callback_data: dict) -> None:
@@ -462,11 +425,95 @@ def _try_save_card_token(db: Session, tx: OnlineTransaction, callback_data: dict
     db.flush()
 
 
+def _confirm_local_transaction_from_callback(
+    db: Session,
+    tx: OnlineTransaction,
+    callback_data: dict[str, str],
+    *,
+    log_action: str = "GATEWAY_CALLBACK",
+) -> int:
+    """Create local payment + applications from an already validated callback payload."""
+    order_id = tx.order_id
+    category = tx.terminal_category
+    payment = Payment(
+        resident_id=tx.resident_id,
+        received_at=now_baku(),
+        amount_total=tx.amount_total,
+        method=PaymentMethod.ONLINE,
+        reference=order_id,
+        comment=f"AzeriCard online payment ({category or 'default'})",
+        created_by_id=None,
+    )
+    db.add(payment)
+    db.flush()
+
+    tx.payment_id = payment.id
+    tx.gateway_status = "CONFIRMED"
+
+    applied_amount = Decimal("0")
+    if tx.invoice_id:
+        applied_amount = apply_payment_to_invoice(
+            db=db,
+            payment_id=payment.id,
+            invoice_id=tx.invoice_id,
+            reference=f"AZERICARD:{order_id}",
+        )
+    apply_payment_to_invoices(
+        db=db,
+        payment_id=payment.id,
+        resident_id=tx.resident_id,
+        scope="all",
+    )
+
+    _try_save_card_token(db, tx, callback_data)
+    db.add(
+        PaymentLog(
+            payment_id=payment.id,
+            resident_id=tx.resident_id,
+            user_id=None,
+            action=log_action,
+            amount=float(tx.amount_total or 0),
+            details=f"AzeriCard confirmed ORDER={order_id} [{category}]; invoice_applied={float(applied_amount)}",
+        )
+    )
+    return payment.id
+
+
 @router.get("/status/{order_id}")
 async def get_status(order_id: str, db: Session = Depends(get_db)):
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == order_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
+
+    # Recovery path: older callbacks were marked SIGNATURE_FAILED due to a stricter
+    # field layout assumption. Re-validate stored callback payload with current rules
+    # and finalize locally if the callback was genuinely successful.
+    if tx.gateway_status == "SIGNATURE_FAILED" and not tx.payment_id and tx.callback_payload:
+        try:
+            callback_data = json.loads(tx.callback_payload)
+            if isinstance(callback_data, dict):
+                callback_data = {str(k): str(v) for k, v in callback_data.items()}
+            else:
+                callback_data = {}
+        except Exception:
+            callback_data = {}
+
+        if callback_data:
+            callback_group = _terminal_group_from_data(callback_data)
+            signature_ok = verify_callback_signature(
+                callback_data,
+                category=tx.terminal_category,
+                terminal_group=callback_group,
+            )
+            action_ok = _pick(callback_data, "ACTION", "action") == "0"
+            if signature_ok and action_ok:
+                _confirm_local_transaction_from_callback(
+                    db=db,
+                    tx=tx,
+                    callback_data=callback_data,
+                    log_action="GATEWAY_CALLBACK_RECOVERED",
+                )
+                db.commit()
 
     category = tx.terminal_category
     group = terminal_group_for_online_trtype(tx.trtype)
