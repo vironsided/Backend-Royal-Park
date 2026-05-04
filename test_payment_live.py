@@ -81,7 +81,7 @@ check("TERMINAL is numeric test terminal", params.get("TERMINAL") in ("17204537"
 check("MERCH_URL in params", bool(params.get("MERCH_URL")), f"MERCH_URL={params.get('MERCH_URL')}")
 check("COUNTRY = AZ", params.get("COUNTRY") == "AZ", f"COUNTRY={params.get('COUNTRY')}")
 check("MERCH_GMT set", bool(params.get("MERCH_GMT")), f"MERCH_GMT={params.get('MERCH_GMT')}")
-check("TRTYPE = 0 (standard auth)", params.get("TRTYPE") == "0", f"TRTYPE={params.get('TRTYPE')}")
+check("TRTYPE = 1 (authorization)", params.get("TRTYPE") == "1", f"TRTYPE={params.get('TRTYPE')}")
 
 order_id = r.get("order_id", "")
 check("order_id present", bool(order_id))
