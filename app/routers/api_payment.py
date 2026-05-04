@@ -2,15 +2,11 @@ from fastapi import APIRouter, HTTPException, Query
 import httpx
 from typing import Optional
 
+from ..config import settings
+
 router = APIRouter(prefix="/api/payment", tags=["payment-api"])
 
-# BINTable API Configuration
-# Для получения API ключа: https://bintable.com/
-# Бесплатный план: 100 lookup/месяц
-# Если ключ не указан, используется fallback определение схемы карты по номеру
 BINTABLE_API_URL = "https://api.bintable.com/v1"
-# В production лучше вынести в config.py или environment variables
-BINTABLE_API_KEY = "acb605ffc7f764ffb8bb7539d1ffdea48b22a7db"  # API ключ от BINTable
 
 
 @router.get("/bin-lookup")
@@ -25,11 +21,11 @@ async def bin_lookup(
     if not bin or len(bin) < 6:
         raise HTTPException(status_code=400, detail="BIN должен содержать минимум 6 цифр")
     
-    # Используем переданный ключ или дефолтный
-    key = api_key or BINTABLE_API_KEY
-    
-    # Если ключ не настроен, используем fallback
-    if key == "YOUR_API_KEY_HERE":
+    # Use caller-supplied key, env-configured key, or fallback
+    key = api_key or settings.BINTABLE_API_KEY or ""
+
+    # No key configured — use local fallback
+    if not key:
         return determine_scheme_by_number(bin)
     
     try:

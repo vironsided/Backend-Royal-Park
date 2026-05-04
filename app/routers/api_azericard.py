@@ -64,8 +64,13 @@ class CompleteRequest(BaseModel):
 
 @router.get("/wallet-config")
 def wallet_config():
-    merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
-    apple_mid = (settings.AZERICARD_APPLE_MERCHANT_ID or "").strip()
+    gpay_merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
+    apple_merchant_name = (settings.AZERICARD_APPLE_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
+    apple_merchant_id = (
+        settings.AZERICARD_APPLE_MERCHANT_IDENTIFIER
+        or settings.AZERICARD_APPLE_MERCHANT_ID
+        or ""
+    ).strip()
     return {
         "ok": True,
         "google_pay": {
@@ -73,16 +78,16 @@ def wallet_config():
             "gateway": (settings.AZERICARD_GPAY_GATEWAY or "azericardgpay").strip(),
             "gatewayMerchantId": (settings.AZERICARD_GPAY_GATEWAY_MERCHANT_ID or "").strip(),
             "merchantId": (settings.AZERICARD_GPAY_MERCHANT_ID or "").strip(),
-            "merchantName": merchant_name,
+            "merchantName": gpay_merchant_name,
             "merchantOrigin": (settings.AZERICARD_MERCH_URL or "").strip(),
             "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
             "supported": bool((settings.AZERICARD_GPAY_GATEWAY_MERCHANT_ID or "").strip()),
         },
         "apple_pay": {
-            "supported": bool(apple_mid),
-            "merchantIdentifier": apple_mid,
-            "merchantName": merchant_name,
+            "merchantIdentifier": apple_merchant_id,
+            "merchantName": apple_merchant_name,
             "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
+            "supported": bool(apple_merchant_id),
         },
     }
 
@@ -106,13 +111,24 @@ def _validate_public_url(value: str, env_name: str) -> None:
             status_code=500,
             detail=f"{env_name} must be a full http/https URL (include host and port if non-standard)",
         )
+    # Warn: Azericard cannot reach localhost/127.0.0.1 in production.
+    hostname = (parsed.hostname or "").lower()
+    if hostname in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"{env_name} is set to a localhost URL ({raw}). "
+                "Azericard cannot deliver callbacks to localhost in production. "
+                "Set a publicly reachable URL."
+            ),
+        )
 
 
 def _ensure_signing_config(category: Optional[str] = None, terminal_group: Optional[str] = None) -> None:
     tid = _terminal_id_for(category, terminal_group=terminal_group)
     if not tid:
         raise HTTPException(status_code=500, detail=f"AZERICARD_TERMINAL ({category or 'default'}) is not configured")
-    from ..services.azericard import _private_key_raw
+    from ..services.azericard import _private_key_raw, _mpi_public_key
     raw = _private_key_raw(category, terminal_group=terminal_group)
     if not raw:
         raise HTTPException(status_code=500, detail=f"AZERICARD_PRIVATE_KEY ({category or 'default'}) is not configured")
@@ -122,6 +138,13 @@ def _ensure_signing_config(category: Optional[str] = None, terminal_group: Optio
         _private_key(category, terminal_group=terminal_group)
     except Exception:
         raise HTTPException(status_code=500, detail=f"AZERICARD_PRIVATE_KEY ({category or 'default'}) has invalid PEM format")
+    # MPI public key must be set for callback verification
+    if not (settings.AZERICARD_MPI_PUBLIC_KEY or "").strip():
+        raise HTTPException(status_code=500, detail="AZERICARD_MPI_PUBLIC_KEY is not configured (needed for callback verification)")
+    try:
+        _mpi_public_key()
+    except Exception:
+        raise HTTPException(status_code=500, detail="AZERICARD_MPI_PUBLIC_KEY has invalid PEM format")
 
 
 def _pick(data: dict[str, Any], *keys: str) -> str:
@@ -160,12 +183,16 @@ def _build_gateway_params(
         "ORDER": order_id,
         "DESC": description[:250],
         "MERCH_NAME": settings.AZERICARD_MERCH_NAME,
-        "MERCH_URL": settings.AZERICARD_MERCH_URL or settings.AZERICARD_CALLBACK_URL,
+        # MERCH_URL must be the merchant's homepage, not the callback URL.
+        # It is also the 7th field signed in P_SIGN per Azericard spec.
+        "MERCH_URL": settings.AZERICARD_MERCH_URL,
         "TERMINAL": terminal_id,
         "TRTYPE": "1" if terminal_group == TERMINAL_GROUP_WALLET else "0",
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
         "BACKREF": settings.AZERICARD_CALLBACK_URL,
+        "COUNTRY": settings.AZERICARD_COUNTRY or "AZ",
+        "MERCH_GMT": settings.AZERICARD_MERCH_GMT or "+4",
     }
     req["MERCH_URL_OK"] = success_url
     req["MERCH_URL_FAIL"] = fail_url
@@ -297,7 +324,12 @@ async def azericard_callback(
     if not order_id:
         raise HTTPException(status_code=400, detail="ORDER is required")
 
-    tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == order_id).first()
+    tx = (
+        db.query(OnlineTransaction)
+        .filter(OnlineTransaction.order_id == order_id)
+        .with_for_update()
+        .first()
+    )
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
     if tx.payment_id:

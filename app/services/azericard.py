@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import hashlib
 import secrets
 from datetime import datetime, timezone
@@ -15,7 +14,10 @@ from cryptography.hazmat.primitives.serialization import load_pem_private_key, l
 from ..config import settings
 
 
-CREATE_SIGN_FIELDS = ["AMOUNT", "CURRENCY", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE", "BACKREF"]
+# Azericard signature field lists (order matters — must match PHP reference exactly)
+# Auth/initiation request: sign MERCH_URL as the 7th field (not BACKREF)
+CREATE_SIGN_FIELDS = ["AMOUNT", "CURRENCY", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE", "MERCH_URL"]
+# Callback / reversal / completion verification
 CALLBACK_SIGN_FIELDS = ["AMOUNT", "CURRENCY", "TERMINAL", "TRTYPE", "ORDER", "RRN", "INT_REF"]
 
 UTILITY_METER_TYPES = {"ELECTRIC", "GAS", "WATER", "SEWERAGE"}
@@ -45,12 +47,13 @@ def _as_pem(raw: str, key_kind: str) -> str:
         return value
     if "BEGIN" in value:
         return value
+    # Bare base64 blob — wrap with PKCS#1 RSA headers to match what Azericard provides.
     clean = "".join(value.split())
     if key_kind == "private":
         return (
-            "-----BEGIN PRIVATE KEY-----\n"
+            "-----BEGIN RSA PRIVATE KEY-----\n"
             f"{clean}\n"
-            "-----END PRIVATE KEY-----"
+            "-----END RSA PRIVATE KEY-----"
         )
     return (
         "-----BEGIN PUBLIC KEY-----\n"
@@ -157,12 +160,29 @@ def _public_key(category: Optional[str] = None, terminal_group: Optional[str] = 
     return load_pem_public_key(key_pem)
 
 
+def _mpi_public_key() -> RSAPublicKey:
+    """Azericard MPI public key — used to verify callbacks signed by Azericard's server."""
+    raw = (settings.AZERICARD_MPI_PUBLIC_KEY or "").strip()
+    if not raw:
+        raise ValueError("AZERICARD_MPI_PUBLIC_KEY is not configured")
+    key_pem = _as_pem(raw, "public").encode("utf-8")
+    return load_pem_public_key(key_pem)
+
+
 # ---------------------------------------------------------------------------
 # Signature generation / verification
+#
+# Azericard uses length-prefixed concatenation (PHP strlen(v).v for each field)
+# and hex-encodes the raw RSA-SHA256 signature bytes (bin2hex in PHP).
 # ---------------------------------------------------------------------------
 
 def build_signature_content(data: dict, fields: Iterable[str]) -> str:
-    return ";".join(str(data.get(name, "") or "") for name in fields)
+    """Build the MAC string per Azericard spec: len(v1)+v1+len(v2)+v2+..."""
+    parts: list[str] = []
+    for name in fields:
+        val = str(data.get(name, "") or "")
+        parts.append(f"{len(val)}{val}")
+    return "".join(parts)
 
 
 def generate_p_sign(
@@ -171,9 +191,10 @@ def generate_p_sign(
     category: Optional[str] = None,
     terminal_group: Optional[str] = None,
 ) -> str:
+    """Sign MAC content with merchant private key; return hex-encoded signature."""
     content = build_signature_content(data, fields).encode("utf-8")
     signature = _private_key(category, terminal_group).sign(content, padding.PKCS1v15(), hashes.SHA256())
-    return base64.b64encode(signature).decode("ascii")
+    return signature.hex()
 
 
 def _terminal_group_from_data(data: dict) -> str:
@@ -191,14 +212,19 @@ def verify_callback_signature(
     category: Optional[str] = None,
     terminal_group: Optional[str] = None,
 ) -> bool:
-    signature_b64 = str(data.get(signature_field, "") or "").strip()
-    if not signature_b64:
+    """Verify Azericard callback P_SIGN using the MPI public key (Azericard's key).
+
+    Azericard signs callbacks with their own MPI private key.
+    The merchant's own public key is NOT used here.
+    P_SIGN is hex-encoded raw RSA-SHA256 signature bytes.
+    """
+    signature_hex = str(data.get(signature_field, "") or "").strip()
+    if not signature_hex:
         return False
     try:
-        signature = base64.b64decode(signature_b64)
+        signature = bytes.fromhex(signature_hex)
         content = build_signature_content(data, CALLBACK_SIGN_FIELDS).encode("utf-8")
-        resolved_group = terminal_group or _terminal_group_from_data(data)
-        _public_key(category, resolved_group).verify(signature, content, padding.PKCS1v15(), hashes.SHA256())
+        _mpi_public_key().verify(signature, content, padding.PKCS1v15(), hashes.SHA256())
         return True
     except Exception:
         return False

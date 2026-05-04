@@ -34,7 +34,12 @@ class Settings(BaseModel):
     AZERICARD_SUCCESS_URL: str = os.getenv("AZERICARD_SUCCESS_URL", "")
     AZERICARD_FAIL_URL: str = os.getenv("AZERICARD_FAIL_URL", "")
     AZERICARD_CURRENCY: str = os.getenv("AZERICARD_CURRENCY", "AZN")
-    AZERICARD_LANG: str = os.getenv("AZERICARD_LANG", "en")
+    AZERICARD_LANG: str = os.getenv("AZERICARD_LANG", "AZ")
+    AZERICARD_COUNTRY: str = os.getenv("AZERICARD_COUNTRY", "AZ")
+    AZERICARD_MERCH_GMT: str = os.getenv("AZERICARD_MERCH_GMT", "+4")
+
+    # AzeriCard — MPI public key (Azericard's key for callback verification)
+    AZERICARD_MPI_PUBLIC_KEY: str = os.getenv("AZERICARD_MPI_PUBLIC_KEY", "")
 
     # AzeriCard — legacy single-terminal (fallback)
     AZERICARD_TERMINAL_ID: str = os.getenv("AZERICARD_TERMINAL_ID", "")
@@ -78,6 +83,13 @@ class Settings(BaseModel):
     AZERICARD_GPAY_MERCHANT_NAME: str = os.getenv("AZERICARD_GPAY_MERCHANT_NAME", "")
     # Apple Pay merchant id (e.g. merchant.com.company.app) — same value as in Xcode Apple Pay capability
     AZERICARD_APPLE_MERCHANT_ID: str = os.getenv("AZERICARD_APPLE_MERCHANT_ID", "")
+
+    # AzeriCard — Apple Pay
+    AZERICARD_APPLE_MERCHANT_IDENTIFIER: str = os.getenv("AZERICARD_APPLE_MERCHANT_IDENTIFIER", "")
+    AZERICARD_APPLE_MERCHANT_NAME: str = os.getenv("AZERICARD_APPLE_MERCHANT_NAME", "")
+
+    # BINTable (card brand lookup — keep out of source code)
+    BINTABLE_API_KEY: str = os.getenv("BINTABLE_API_KEY", "")
 
     # Firebase Cloud Messaging (backend)
     FIREBASE_CREDENTIALS_PATH: str = os.getenv("FIREBASE_CREDENTIALS_PATH", "")
