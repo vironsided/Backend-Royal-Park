@@ -451,6 +451,7 @@ def _confirm_local_transaction_from_callback(
     tx.gateway_status = "CONFIRMED"
 
     applied_amount = Decimal("0")
+    auto_applied_count = 0
     if tx.invoice_id:
         applied_amount = apply_payment_to_invoice(
             db=db,
@@ -458,12 +459,16 @@ def _confirm_local_transaction_from_callback(
             invoice_id=tx.invoice_id,
             reference=f"AZERICARD:{order_id}",
         )
-    apply_payment_to_invoices(
-        db=db,
-        payment_id=payment.id,
-        resident_id=tx.resident_id,
-        scope="all",
-    )
+        # For direct invoice payments, preserve existing behavior:
+        # distribute any payment leftover across other open invoices.
+        auto_applied_count = apply_payment_to_invoices(
+            db=db,
+            payment_id=payment.id,
+            resident_id=tx.resident_id,
+            scope="all",
+        )
+    # If invoice_id is empty, this is an advance top-up flow.
+    # Keep the amount as resident advance (payment leftover) and do not auto-apply.
 
     _try_save_card_token(db, tx, callback_data)
     db.add(
@@ -473,7 +478,10 @@ def _confirm_local_transaction_from_callback(
             user_id=None,
             action=log_action,
             amount=float(tx.amount_total or 0),
-            details=f"AzeriCard confirmed ORDER={order_id} [{category}]; invoice_applied={float(applied_amount)}",
+            details=(
+                f"AzeriCard confirmed ORDER={order_id} [{category}]; "
+                f"invoice_applied={float(applied_amount)}; auto_applied_count={auto_applied_count}"
+            ),
         )
     )
     return payment.id
