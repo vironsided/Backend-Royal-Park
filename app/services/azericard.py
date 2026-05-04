@@ -243,8 +243,9 @@ def build_order_id(terminal_id: str | None = None) -> str:
     order = "".join(ch for ch in order if ch.isdigit())
     if len(order) < 6:
         order = (order + "0" * 6)[:6]
-    if len(order) > 32:
-        order = order[:32]
+    # Azericard auth request expects ORDER length in 6..20 range.
+    if len(order) > 20:
+        order = order[:20]
     return order
 
 
