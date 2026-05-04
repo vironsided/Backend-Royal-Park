@@ -9,7 +9,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -328,15 +328,14 @@ async def azericard_callback(
 
     # Lock only the target row ID first to avoid PostgreSQL FOR UPDATE errors
     # on ORM-generated outer joins.
-    tx_id_row = (
-        db.query(OnlineTransaction.id)
-        .filter(OnlineTransaction.order_id == order_id)
+    tx_id = db.execute(
+        select(OnlineTransaction.__table__.c.id)
+        .where(OnlineTransaction.__table__.c.order_id == order_id)
         .with_for_update()
-        .first()
-    )
-    if not tx_id_row:
+    ).scalar_one_or_none()
+    if not tx_id:
         raise HTTPException(status_code=404, detail="Order not found")
-    tx = db.get(OnlineTransaction, tx_id_row[0])
+    tx = db.get(OnlineTransaction, tx_id)
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
     if tx.payment_id:
