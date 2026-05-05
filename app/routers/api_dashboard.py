@@ -11,9 +11,10 @@ from ..database import get_db
 from ..models import (
     User, Resident, Payment, Invoice, Block,
     Notification, NotificationStatus, PaymentMethod, PaymentApplication, InvoiceStatus,
-    MeterReading, ResidentMeter, MeterType, Tariff
+    MeterReading, ResidentMeter, MeterType, Tariff, RoleEnum
 )
 from ..utils import now_baku, to_baku_datetime
+from ..deps import require_any_role
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard-api"])
 
@@ -74,8 +75,9 @@ class PaymentChartDataOut(BaseModel):
 @router.get("/stats")
 def get_dashboard_stats(
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
-    """Получить статистику для dashboard (публичный endpoint)."""
+    """Получить статистику для dashboard (только staff)."""
     try:
         # Общее количество пользователей
         total_users = db.query(func.count(User.id)).scalar() or 0
@@ -219,8 +221,9 @@ def get_dashboard_stats(
 def get_recent_payments(
     limit: int = Query(5, ge=1, le=20),
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
-    """Получить последние платежи (публичный endpoint)."""
+    """Получить последние платежи (только staff)."""
     try:
         payments = db.query(Payment).join(Resident, Resident.id == Payment.resident_id).order_by(
             Payment.received_at.desc()
@@ -299,8 +302,9 @@ def get_recent_payments(
 def get_recent_activity(
     limit: int = Query(10, ge=1, le=50),
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
-    """Получить последнюю активность (публичный endpoint)."""
+    """Получить последнюю активность (только staff)."""
     try:
         activities = []
         
@@ -370,8 +374,9 @@ def get_recent_activity(
 def get_payment_chart_data(
     period: str = Query("week", regex="^(day|week|month|year)$"),
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
-    """Получить данные для графика платежей (публичный endpoint)."""
+    """Получить данные для графика платежей (только staff)."""
     try:
         now = now_baku()
         labels = []

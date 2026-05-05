@@ -17,6 +17,7 @@ from ..models import (
     PaymentLog,
     RoleEnum,
 )
+from ..deps import require_any_role
 
 router = APIRouter(prefix="/api/logs", tags=["logs-api"])
 
@@ -73,6 +74,7 @@ def get_reading_logs(
     meter_id: Optional[int] = Query(None),
     user_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """Получить логи чтений с фильтрацией и пагинацией (публичный endpoint)."""
     try:
@@ -214,6 +216,7 @@ def get_payment_logs(
     resident_id: Optional[int] = Query(None),
     user_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
+    _staff_user: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """Получить логи платежей с фильтрацией и пагинацией."""
     try:

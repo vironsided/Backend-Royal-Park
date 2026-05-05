@@ -36,7 +36,7 @@ class BlockUpdate(BaseModel):
 @router.get("/", response_model=List[BlockOut])
 def list_blocks_api(
     db: Session = Depends(get_db),
-    actor: User = Depends(get_current_user),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """
     JSON-список блоков для SPA-админки.
@@ -49,7 +49,7 @@ def list_blocks_api(
 def create_block_api(
     payload: BlockCreate,
     db: Session = Depends(get_db),
-    actor: User = Depends(get_current_user),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """
     Создание блока из SPA.
@@ -80,7 +80,7 @@ def update_block_api(
     block_id: int,
     payload: BlockUpdate,
     db: Session = Depends(get_db),
-    actor: User = Depends(get_current_user),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """
     Обновление блока (переименование, изменение статуса).
@@ -118,7 +118,7 @@ def update_block_api(
 def delete_block_api(
     block_id: int,
     db: Session = Depends(get_db),
-    actor: User = Depends(get_current_user),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
 ):
     """
     Удаление блока.

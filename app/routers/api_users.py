@@ -76,6 +76,12 @@ class UserListOut(BaseModel):
     last_page: int
 
 
+def _ensure_user_admin_access(actor: User) -> None:
+    """Only ROOT and ADMIN can manage/list users."""
+    if actor.role not in (RoleEnum.ROOT, RoleEnum.ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
+
+
 @router.get("/", response_model=UserListOut)
 def list_users_api(
     db: Session = Depends(get_db),
@@ -86,6 +92,7 @@ def list_users_api(
     """
     JSON-список пользователей для SPA-админки с пагинацией.
     """
+    _ensure_user_admin_access(actor)
     query = db.query(User)
     total = query.count()
     last_page = max(1, (total + per_page - 1) // per_page)
@@ -114,6 +121,8 @@ def create_user_api(
     root может создавать любых, admin — только operator/resident
     (роли root/admin/sales admin создавать не имеет права).
     """
+    _ensure_user_admin_access(actor)
+
     if actor.role == RoleEnum.ADMIN and payload.role in (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.SALES):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
 
