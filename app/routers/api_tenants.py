@@ -1,6 +1,6 @@
 from typing import List, Optional
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
@@ -308,7 +308,7 @@ def _create_tenant_internal(
     }
 
 
-@router.post("/public")
+@router.post("/public", status_code=status.HTTP_201_CREATED)
 def create_tenant_public(
     data: TenantCreate,
     db: Session = Depends(get_db),
@@ -325,7 +325,7 @@ def create_tenant_public(
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-@router.post("")
+@router.post("", status_code=status.HTTP_201_CREATED)
 def create_tenant_api(
     data: TenantCreate,
     db: Session = Depends(get_db),
