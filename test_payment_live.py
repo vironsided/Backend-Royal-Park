@@ -81,7 +81,7 @@ check("TERMINAL is numeric test terminal", params.get("TERMINAL") in ("17204537"
 check("MERCH_URL in params", bool(params.get("MERCH_URL")), f"MERCH_URL={params.get('MERCH_URL')}")
 check("COUNTRY = AZ", params.get("COUNTRY") == "AZ", f"COUNTRY={params.get('COUNTRY')}")
 check("MERCH_GMT set", bool(params.get("MERCH_GMT")), f"MERCH_GMT={params.get('MERCH_GMT')}")
-check("TRTYPE = 1 (authorization)", params.get("TRTYPE") == "1", f"TRTYPE={params.get('TRTYPE')}")
+check("TRTYPE is allowed auth mode (0 or 1)", params.get("TRTYPE") in {"0", "1"}, f"TRTYPE={params.get('TRTYPE')}")
 
 order_id = r.get("order_id", "")
 check("order_id present", bool(order_id))
@@ -127,10 +127,34 @@ print("=" * 60)
 print("TEST 5: Status check for initiated order")
 print("=" * 60)
 if order_id:
-    r2 = get(f"/api/azericard/status/{order_id}")
+    r2 = get(f"/api/azericard/status/{order_id}?tran_trtype=1")
     check("Status endpoint reachable", "local_status" in r2, str(r2))
     check("Local status = INITIATED", r2.get("local_status") == "INITIATED",
           f"status={r2.get('local_status')}")
+    check("TRAN_TRTYPE support on status endpoint", r2.get("http_status") == 200, str(r2))
+
+print()
+print("=" * 60)
+print("TEST 6: Post-auth operation endpoints existence")
+print("=" * 60)
+dummy_op = {
+    "order_id": "DUMMY_NOT_FOUND",
+    "amount": 1.0,
+    "currency": "AZN",
+    "rrn": "112676199769",
+    "int_ref": "5E3601D7C71745A9",
+}
+r_complete = post("/api/azericard/complete", dummy_op)
+check("Complete endpoint exists (returns structured error for unknown order)",
+      r_complete.get("error") in (404, 422))
+
+r_reversal = post("/api/azericard/reversal?trtype=22", dummy_op)
+check("Reversal endpoint exists (TRTYPE=22)",
+      r_reversal.get("error") in (404, 422))
+
+r_operation = post("/api/azericard/operation", {**dummy_op, "trtype": "24"})
+check("Generic operation endpoint exists (TRTYPE=24)",
+      r_operation.get("error") in (404, 422))
 
 print()
 print("=" * 60)

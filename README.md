@@ -63,11 +63,21 @@ docker compose up --build
   - `AZERICARD_PRIVATE_KEY_WALLET`
   - `AZERICARD_PUBLIC_KEY_WALLET`
 - `AZERICARD_CALLBACK_URL` должен быть публичным full URL (не `localhost`) и используется как `BACKREF`.
+- Настройка типа авторизации:
+  - `AZERICARD_AUTH_TRTYPE=1` — обычная авторизация (рекомендуемый default).
+  - `AZERICARD_AUTH_TRTYPE=0` — preauth (требует последующего `TRTYPE=21` confirm).
+- Для status-запросов (`TRTYPE=90`) можно передавать/зафиксировать `TRAN_TRTYPE`:
+  - env: `AZERICARD_STATUS_TRAN_TRTYPE` (обычно `1`)
+  - API: `GET /api/azericard/status/{order_id}?tran_trtype=1`
 - `POST /api/azericard/initiate` принимает дополнительные поля для wallet-потока:
   - `wallet_provider`: `google_pay` или `apple_pay`
   - `wallet_token`: токен кошелька (для Google Pay передается как `GPAYTOKEN`)
   - `wallet_eci`, `wallet_tavv`: 3DS-поля для Apple Pay (если требуются вашим сценарием)
 - Конфиг Google Pay для фронта читается из `GET /api/azericard/wallet-config`.
+- Post-auth операции gateway:
+  - `POST /api/azericard/complete` (`TRTYPE=21`)
+  - `POST /api/azericard/reversal?trtype=22|24`
+  - `POST /api/azericard/operation` с телом `{ trtype: "21"|"22"|"24", order_id, amount, currency, rrn, int_ref }`
 - Для Google Pay обязательно заполните:
   - `AZERICARD_GPAY_GATEWAY` (обычно `azericardgpay`)
   - `AZERICARD_GPAY_GATEWAY_MERCHANT_ID` (выдаётся Azericard; без него Google Pay выдаёт OR_BIBED_06)

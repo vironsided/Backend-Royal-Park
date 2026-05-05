@@ -37,6 +37,10 @@ class Settings(BaseModel):
     AZERICARD_LANG: str = os.getenv("AZERICARD_LANG", "AZ")
     AZERICARD_COUNTRY: str = os.getenv("AZERICARD_COUNTRY", "AZ")
     AZERICARD_MERCH_GMT: str = os.getenv("AZERICARD_MERCH_GMT", "+4")
+    # Auth flow transaction type: "1" (authorization, default) or "0" (pre-authorization)
+    AZERICARD_AUTH_TRTYPE: str = os.getenv("AZERICARD_AUTH_TRTYPE", "1")
+    # Optional default TRAN_TRTYPE for TRTYPE=90 status inquiry (usually "1")
+    AZERICARD_STATUS_TRAN_TRTYPE: str = os.getenv("AZERICARD_STATUS_TRAN_TRTYPE", "1")
 
     # AzeriCard — MPI public key (Azericard's key for callback verification)
     AZERICARD_MPI_PUBLIC_KEY: str = os.getenv("AZERICARD_MPI_PUBLIC_KEY", "")

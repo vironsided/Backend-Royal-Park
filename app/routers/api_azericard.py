@@ -62,6 +62,15 @@ class CompleteRequest(BaseModel):
     int_ref: str
 
 
+class PostAuthOperationRequest(BaseModel):
+    order_id: str
+    amount: Decimal
+    currency: str = "AZN"
+    rrn: str
+    int_ref: str
+    trtype: str
+
+
 @router.get("/wallet-config")
 def wallet_config():
     gpay_merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
@@ -160,6 +169,20 @@ def _wants_html(request: Request) -> bool:
     return "text/html" in accept or "*/*" in accept
 
 
+def _resolve_auth_trtype() -> str:
+    raw = (settings.AZERICARD_AUTH_TRTYPE or "1").strip()
+    if raw not in {"0", "1"}:
+        raise HTTPException(status_code=500, detail="AZERICARD_AUTH_TRTYPE must be '0' or '1'")
+    return raw
+
+
+def _resolve_postauth_trtype(raw: str) -> str:
+    tr = str(raw or "").strip()
+    if tr not in {"21", "22", "24"}:
+        raise HTTPException(status_code=400, detail="trtype must be one of: 21, 22, 24")
+    return tr
+
+
 def _build_gateway_params(
     amount: Decimal,
     category: str,
@@ -187,9 +210,10 @@ def _build_gateway_params(
         # It is also the 7th field signed in P_SIGN per Azericard spec.
         "MERCH_URL": settings.AZERICARD_MERCH_URL,
         "TERMINAL": terminal_id,
-        # Azericard test profile for this merchant accepts authorization TRTYPE=1.
-        # Using TRTYPE=0 causes gateway "Giris qadagandir" rejection on this setup.
-        "TRTYPE": "1",
+        # Configurable auth flow per merchant profile:
+        #  - "1" = authorization (default)
+        #  - "0" = pre-authorization (requires follow-up TRTYPE=21)
+        "TRTYPE": _resolve_auth_trtype(),
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
         "BACKREF": settings.AZERICARD_CALLBACK_URL,
@@ -488,7 +512,7 @@ def _confirm_local_transaction_from_callback(
 
 
 @router.get("/status/{order_id}")
-async def get_status(order_id: str, db: Session = Depends(get_db)):
+async def get_status(order_id: str, tran_trtype: Optional[str] = None, db: Session = Depends(get_db)):
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == order_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -535,9 +559,14 @@ async def get_status(order_id: str, db: Session = Depends(get_db)):
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
     }
+    sign_fields = ["ORDER", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE"]
+    effective_tran_trtype = (tran_trtype or settings.AZERICARD_STATUS_TRAN_TRTYPE or "").strip()
+    if effective_tran_trtype:
+        payload["TRAN_TRTYPE"] = effective_tran_trtype
+        sign_fields = ["TRAN_TRTYPE"] + sign_fields
     payload["P_SIGN"] = generate_p_sign(
         payload,
-        ["ORDER", "TERMINAL", "TRTYPE", "TIMESTAMP", "NONCE"],
+        sign_fields,
         category,
         terminal_group=group,
     )
@@ -552,8 +581,7 @@ async def get_status(order_id: str, db: Session = Depends(get_db)):
     }
 
 
-@router.post("/complete")
-async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_db)):
+async def _run_postauth_operation(payload: CompleteRequest, trtype: str, db: Session) -> dict[str, Any]:
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == payload.order_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -569,7 +597,7 @@ async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_d
         "RRN": payload.rrn,
         "INT_REF": payload.int_ref,
         "TERMINAL": terminal_id,
-        "TRTYPE": "21",
+        "TRTYPE": trtype,
         "TIMESTAMP": build_timestamp(),
         "NONCE": build_nonce(),
     }
@@ -577,7 +605,34 @@ async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_d
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         response = await client.post(settings.AZERICARD_API_URL, data=req)
-    return {"ok": response.status_code == 200, "http_status": response.status_code, "gateway_response": response.text}
+    return {
+        "ok": response.status_code == 200,
+        "http_status": response.status_code,
+        "gateway_response": response.text,
+        "request": req,
+    }
+
+
+@router.post("/complete")
+async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_db)):
+    return await _run_postauth_operation(payload, "21", db)
+
+
+@router.post("/reversal")
+async def reversal_payment(payload: CompleteRequest, trtype: str = "22", db: Session = Depends(get_db)):
+    return await _run_postauth_operation(payload, _resolve_postauth_trtype(trtype), db)
+
+
+@router.post("/operation")
+async def gateway_operation(payload: PostAuthOperationRequest, db: Session = Depends(get_db)):
+    op = CompleteRequest(
+        order_id=payload.order_id,
+        amount=payload.amount,
+        currency=payload.currency,
+        rrn=payload.rrn,
+        int_ref=payload.int_ref,
+    )
+    return await _run_postauth_operation(op, _resolve_postauth_trtype(payload.trtype), db)
 
 
 # ---------------------------------------------------------------------------
