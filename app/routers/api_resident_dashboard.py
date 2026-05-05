@@ -1720,6 +1720,27 @@ def create_resident_payment(
                 reference_value = f"ADVANCE_USE:{target_invoice.id}"
                 comment_suffix = f" (счёт {target_invoice.number or target_invoice.id})"
 
+            duplicate_cutoff = datetime.utcnow() - timedelta(seconds=15)
+            existing_recent = (
+                db.query(Payment)
+                .filter(
+                    Payment.resident_id == data.resident_id,
+                    Payment.method == PaymentMethod.ADVANCE,
+                    Payment.created_by_id == user.id,
+                    Payment.reference == reference_value,
+                    Payment.amount_total == target_amount,
+                    Payment.created_at >= duplicate_cutoff,
+                )
+                .order_by(Payment.id.desc())
+                .first()
+            )
+            if existing_recent:
+                return ResidentPaymentResponse(
+                    ok=True,
+                    payment_id=existing_recent.id,
+                    message="Аванс уже был применён (повторный запрос проигнорирован)",
+                )
+
             history_payment = Payment(
                 resident_id=data.resident_id,
                 received_at=now_baku(),
