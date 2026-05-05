@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -167,6 +167,25 @@ def _pick(data: dict[str, Any], *keys: str) -> str:
 def _wants_html(request: Request) -> bool:
     accept = (request.headers.get("accept") or "").lower()
     return "text/html" in accept or "*/*" in accept
+
+
+def _frontend_payment_return_url(status: str, order_id: Optional[str] = None, reason: Optional[str] = None) -> str:
+    base = (settings.FRONTEND_BASE_URL or "").strip().rstrip("/")
+    if not base:
+        # Fallback to relative route if frontend base is not configured.
+        params = {"ok": status}
+        if order_id:
+            params["order_id"] = order_id
+        if reason:
+            params["reason"] = reason
+        return f"/user/dashboard.html?{urlencode(params)}#bills"
+
+    params = {"ok": status}
+    if order_id:
+        params["order_id"] = order_id
+    if reason:
+        params["reason"] = reason
+    return f"{base}/user/dashboard.html?{urlencode(params)}#bills"
 
 
 def _resolve_auth_trtype() -> str:
@@ -725,23 +744,15 @@ def _get_session_user_id(request: Request) -> Optional[int]:
 
 @router.get("/success", response_class=HTMLResponse)
 def payment_success_page(order_id: str | None = None):
-    order_suffix = f"&order_id={order_id}" if order_id else ""
-    return f"""
-    <html><body style="font-family:Arial,sans-serif;padding:24px;">
-      <h2>Payment successful</h2>
-      <p>Your payment has been confirmed.</p>
-      <a href="/resident/invoices?ok=online_payment_success{order_suffix}">Back to invoices</a>
-    </body></html>
-    """
+    return RedirectResponse(
+        url=_frontend_payment_return_url("online_payment_success", order_id=order_id),
+        status_code=302,
+    )
 
 
 @router.get("/fail", response_class=HTMLResponse)
-def payment_fail_page(order_id: str | None = None):
-    order_suffix = f"&order_id={order_id}" if order_id else ""
-    return f"""
-    <html><body style="font-family:Arial,sans-serif;padding:24px;">
-      <h2>Payment failed</h2>
-      <p>The payment was declined or canceled.</p>
-      <a href="/resident/invoices?ok=online_payment_failed{order_suffix}">Back to invoices</a>
-    </body></html>
-    """
+def payment_fail_page(order_id: str | None = None, reason: str | None = None):
+    return RedirectResponse(
+        url=_frontend_payment_return_url("online_payment_failed", order_id=order_id, reason=reason),
+        status_code=302,
+    )
