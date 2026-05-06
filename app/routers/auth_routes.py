@@ -6,7 +6,7 @@ from starlette import status
 from pydantic import BaseModel
 from ..database import get_db
 from ..models import User, RoleEnum
-from ..security import verify_password, set_session, clear_session
+from ..security import verify_password, set_session, clear_session, make_session_token
 from ..deps import get_current_user
 from ..frontend import redirect_frontend, redirect_admin
 
@@ -24,6 +24,7 @@ class LoginResponse(BaseModel):
     username: str
     message: str
     require_password_change: bool = False
+    session_token: str | None = None
 
 
 @router.get("/login")
@@ -73,7 +74,8 @@ async def api_login(login_data: LoginRequest, db: Session = Depends(get_db)):
         role=user.role.value,
         username=user.username,
         message="Вход выполнен успешно",
-        require_password_change=user.require_password_change
+        require_password_change=user.require_password_change,
+        session_token=make_session_token(user.id),
     )
     
     # Создаем Response и устанавливаем cookie

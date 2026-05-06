@@ -23,8 +23,23 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
+def make_session_token(user_id: int) -> str:
+    return serializer.dumps({"user_id": int(user_id)})
+
+
+def _read_bearer_token(request: Request) -> str | None:
+    auth = (request.headers.get("authorization") or "").strip()
+    if not auth:
+        return None
+    parts = auth.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
 def set_session(response: Response, user_id: int):
-    token = serializer.dumps({"user_id": user_id})
+    token = make_session_token(user_id)
     cross_site = _use_cross_site_cookie()
     response.set_cookie(
         key=settings.COOKIE_NAME,
@@ -48,7 +63,7 @@ def clear_session(response: Response):
 
 
 def get_user_id_from_session(request: Request) -> int | None:
-    token = request.cookies.get(settings.COOKIE_NAME)
+    token = request.cookies.get(settings.COOKIE_NAME) or _read_bearer_token(request)
     if not token:
         return None
     try:
