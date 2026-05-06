@@ -48,6 +48,7 @@ class InitiateRequest(BaseModel):
     description: Optional[str] = None
     saved_card_id: Optional[int] = None
     terminal_category: Optional[str] = None
+    terminal_group: Optional[str] = None
     wallet_provider: Optional[str] = None
     wallet_token: Optional[str] = None
     wallet_eci: Optional[str] = None
@@ -307,8 +308,10 @@ def initiate_payment(
             category = TERMINAL_CATEGORY_UTILITY
 
     wallet_provider = (payload.wallet_provider or "").strip().lower()
-    is_wallet = wallet_provider in {"google_pay", "apple_pay"}
-    terminal_group = TERMINAL_GROUP_WALLET if is_wallet else TERMINAL_GROUP_STANDARD
+    requested_group = (payload.terminal_group or "").strip().lower()
+    is_wallet_provider = wallet_provider in {"google_pay", "apple_pay"}
+    is_wallet_group = requested_group == TERMINAL_GROUP_WALLET
+    terminal_group = TERMINAL_GROUP_WALLET if (is_wallet_provider or is_wallet_group) else TERMINAL_GROUP_STANDARD
 
     _ensure_signing_config(category, terminal_group=terminal_group)
 

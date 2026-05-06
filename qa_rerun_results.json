@@ -1,0 +1,148 @@
+{
+  "passed": 28,
+  "total": 28,
+  "failed_count": 0,
+  "failed": [],
+  "results": [
+    {
+      "check": "anon blocked /api/dashboard/stats",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anon blocked /api/dashboard/recent-payments",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anon blocked /api/dashboard/recent-activity",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anon blocked /api/dashboard/payment-chart",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "operator login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator forbidden create ROOT",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "operator forbidden create ADMIN",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "operator forbidden create SALES",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "operator users list forbidden",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "sales login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales forbidden /api/users/",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "sales forbidden /api/blocks/",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "sales contracts allowed",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "root login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "create linked tenant user status 201",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "check": "linked resident login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "linked resident invoices list",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "linked resident own invoice detail",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "linked resident forbidden /api/users/",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "linked resident forbidden /api/blocks/",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "linked resident forbidden /api/logs/payment-logs",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "linked resident forbidden /api/dashboard/stats",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "admin login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin allowed /api/users/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin allowed /api/blocks/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin allowed /api/logs/payment-logs",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin allowed /api/dashboard/stats",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "azericard initiate still ok",
+      "ok": true,
+      "detail": "status=200"
+    }
+  ]
+}

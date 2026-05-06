@@ -1,0 +1,51 @@
+{
+  "suffix": "05051718fd",
+  "block_id": 5,
+  "users": [
+    {
+      "id": 16,
+      "username": "qa_admin_1_05051718fd",
+      "role": "ADMIN",
+      "temp_password_plain": "xAPiEcEhRizv"
+    },
+    {
+      "id": 17,
+      "username": "qa_operator_2_05051718fd",
+      "role": "OPERATOR",
+      "temp_password_plain": "KewVvrpBMw3F"
+    },
+    {
+      "id": 18,
+      "username": "qa_sales_3_05051718fd",
+      "role": "SALES",
+      "temp_password_plain": "RU5SzRtweJST"
+    },
+    {
+      "id": 19,
+      "username": "qa_resident_4_05051718fd",
+      "role": "RESIDENT",
+      "temp_password_plain": "oaz81VhtzKYM"
+    },
+    {
+      "id": 20,
+      "username": "qa_resident_5_05051718fd",
+      "role": "RESIDENT",
+      "temp_password_plain": "Q4cJOHiuZ72A"
+    }
+  ],
+  "residents": [
+    {
+      "id": 5,
+      "debt": 120.0,
+      "invoice_id": 5
+    },
+    {
+      "id": 6,
+      "debt": 80.0,
+      "invoice_id": 6
+    }
+  ],
+  "tariff_id": 4,
+  "topup_payment_id": 14,
+  "advance_use_payment_id": 15
+}

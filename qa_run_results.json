@@ -1,0 +1,375 @@
+{
+  "timestamp": "2026-05-05T17:20:40.252835",
+  "seed_suffix": "05051718fd",
+  "passed": 40,
+  "total": 55,
+  "failed_count": 15,
+  "failed": [
+    {
+      "check": "anonymous exposure /api/dashboard/stats should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/recent-payments should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/recent-activity should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/payment-chart should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "operator create ROOT forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator create ADMIN forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator create SALES forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator users list forbidden",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales access policy /api/users/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales access policy /api/blocks/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident own endpoint /api/resident/invoice/5",
+      "ok": false,
+      "detail": "status=403"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/users/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/blocks/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/dashboard/stats",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/logs/payment-logs",
+      "ok": false,
+      "detail": "status=200"
+    }
+  ],
+  "results": [
+    {
+      "check": "anonymous /api/users/",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anonymous /api/blocks/",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anonymous /api/resident/dashboard",
+      "ok": true,
+      "detail": "status=401"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/stats should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/recent-payments should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/recent-activity should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "anonymous exposure /api/dashboard/payment-chart should be protected",
+      "ok": false,
+      "detail": "actual_status=200"
+    },
+    {
+      "check": "admin login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/users/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/blocks/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/residents/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/invoices",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/payments/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/logs/payment-logs",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin can access /api/news/admin",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "admin create ROOT forbidden",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "admin create ADMIN forbidden",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "admin create SALES forbidden",
+      "ok": true,
+      "detail": "status=403"
+    },
+    {
+      "check": "admin create OPERATOR allowed",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "check": "admin create RESIDENT allowed",
+      "ok": true,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator create ROOT forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator create ADMIN forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator create SALES forbidden",
+      "ok": false,
+      "detail": "status=201"
+    },
+    {
+      "check": "operator access operational /api/tariffs",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator access operational /api/residents/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator access operational /api/readings/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator access operational /api/invoices",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator access operational /api/payments/",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "operator users list forbidden",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales access policy /api/sales/contracts",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales access policy /api/users/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "sales access policy /api/blocks/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident login",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident own endpoint /api/resident/dashboard",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident own endpoint /api/resident/invoices",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident own endpoint /api/resident/invoice/5",
+      "ok": false,
+      "detail": "status=403"
+    },
+    {
+      "check": "resident own endpoint /api/resident/advance-history",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/users/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/blocks/",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/dashboard/stats",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "resident admin endpoint forbidden /api/logs/payment-logs",
+      "ok": false,
+      "detail": "status=200"
+    },
+    {
+      "check": "root relogin for payment checks",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "overdue invoices query returns at least one",
+      "ok": true,
+      "detail": "count=1"
+    },
+    {
+      "check": "second resident invoice exists",
+      "ok": true,
+      "detail": "count=1"
+    },
+    {
+      "check": "advance-use payment has applications",
+      "ok": true,
+      "detail": "status=200 applied=30.0"
+    },
+    {
+      "check": "azericard wallet-config",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "azericard initiate",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "azericard p_sign format",
+      "ok": true,
+      "detail": "9f90e2eb440c4c8b1f6a16b3"
+    },
+    {
+      "check": "azericard status endpoint",
+      "ok": true,
+      "detail": "status=200 local_status=INITIATED"
+    },
+    {
+      "check": "azericard callback missing ORDER rejected",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "check": "frontend page reachable /",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "frontend page reachable /admin/index.html",
+      "ok": true,
+      "detail": "status=200"
+    },
+    {
+      "check": "frontend page reachable /user/dashboard.html",
+      "ok": true,
+      "detail": "status=200"
+    }
+  ],
+  "artifacts": {
+    "block_id": 5,
+    "resident_ids": [
+      5,
+      6
+    ],
+    "invoice_ids": [
+      5,
+      6
+    ],
+    "topup_payment_id": 14,
+    "advance_use_payment_id": 15,
+    "azericard_order_id": "17204526050566658405"
+  }
+}
