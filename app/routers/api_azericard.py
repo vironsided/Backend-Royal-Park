@@ -72,6 +72,13 @@ class PostAuthOperationRequest(BaseModel):
     trtype: str
 
 
+class ReversalByOrderRequest(BaseModel):
+    order_id: str
+    amount: Decimal
+    currency: str = "AZN"
+    trtype: str = "22"
+
+
 @router.get("/wallet-config")
 def wallet_config():
     gpay_merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
@@ -643,6 +650,30 @@ async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_d
 @router.post("/reversal")
 async def reversal_payment(payload: CompleteRequest, trtype: str = "22", db: Session = Depends(get_db)):
     return await _run_postauth_operation(payload, _resolve_postauth_trtype(trtype), db)
+
+
+@router.post("/reversal/by-order")
+async def reversal_payment_by_order(payload: ReversalByOrderRequest, db: Session = Depends(get_db)):
+    tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == payload.order_id).first()
+    if not tx:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    rrn = (tx.rrn or "").strip()
+    int_ref = (tx.int_ref or "").strip()
+    if not rrn or not int_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="RRN/INT_REF not found for this order. Ensure successful callback was received before reversal.",
+        )
+
+    op = CompleteRequest(
+        order_id=payload.order_id,
+        amount=payload.amount,
+        currency=payload.currency,
+        rrn=rrn,
+        int_ref=int_ref,
+    )
+    return await _run_postauth_operation(op, _resolve_postauth_trtype(payload.trtype), db)
 
 
 @router.post("/operation")

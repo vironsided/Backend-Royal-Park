@@ -77,6 +77,7 @@ docker compose up --build
 - Post-auth операции gateway:
   - `POST /api/azericard/complete` (`TRTYPE=21`)
   - `POST /api/azericard/reversal?trtype=22|24`
+  - `POST /api/azericard/reversal/by-order` с телом `{ order_id, amount, currency?, trtype? }` (RRN/INT_REF подтягиваются автоматически из сохраненного callback)
   - `POST /api/azericard/operation` с телом `{ trtype: "21"|"22"|"24", order_id, amount, currency, rrn, int_ref }`
 - Для Google Pay обязательно заполните:
   - `AZERICARD_GPAY_GATEWAY` (обычно `azericardgpay`)
