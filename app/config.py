@@ -63,6 +63,13 @@ class Settings(BaseModel):
     AZERICARD_PRIVATE_KEY_ADVANCE: str = os.getenv("AZERICARD_PRIVATE_KEY_ADVANCE", "")
     AZERICARD_PUBLIC_KEY_ADVANCE: str = os.getenv("AZERICARD_PUBLIC_KEY_ADVANCE", "")
 
+    # AzeriCard — temporary terminal routing simulation (for QA/debug)
+    AZERICARD_TERMINAL_SIMULATION_ENABLED: bool = os.getenv("AZERICARD_TERMINAL_SIMULATION_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    AZERICARD_SIM_TERMINAL_UTILITY: str = os.getenv("AZERICARD_SIM_TERMINAL_UTILITY", "")
+    AZERICARD_SIM_TERMINAL_MAINTENANCE: str = os.getenv("AZERICARD_SIM_TERMINAL_MAINTENANCE", "")
+    AZERICARD_SIM_TERMINAL_WALLET_UTILITY: str = os.getenv("AZERICARD_SIM_TERMINAL_WALLET_UTILITY", "")
+    AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE: str = os.getenv("AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE", "")
+
     # AzeriCard — dedicated wallet terminals (Apple Pay / Google Pay), per business category
     AZERICARD_TERMINAL_WALLET_UTILITY: str = os.getenv("AZERICARD_TERMINAL_WALLET_UTILITY", "")
     AZERICARD_PRIVATE_KEY_WALLET_UTILITY: str = os.getenv("AZERICARD_PRIVATE_KEY_WALLET_UTILITY", "")

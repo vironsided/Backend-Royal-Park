@@ -79,6 +79,18 @@ docker compose up --build
   - `POST /api/azericard/reversal?trtype=22|24`
   - `POST /api/azericard/reversal/by-order` с телом `{ order_id, amount, currency?, trtype? }` (RRN/INT_REF подтягиваются автоматически из сохраненного callback)
   - `POST /api/azericard/operation` с телом `{ trtype: "21"|"22"|"24", order_id, amount, currency, rrn, int_ref }`
+- Временная имитация terminal routing для QA (standard + wallet):
+  - включение: `AZERICARD_TERMINAL_SIMULATION_ENABLED=true`
+  - standard:
+    - `AZERICARD_SIM_TERMINAL_UTILITY`
+    - `AZERICARD_SIM_TERMINAL_MAINTENANCE`
+  - wallet:
+    - `AZERICARD_SIM_TERMINAL_WALLET_UTILITY`
+    - `AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE`
+  - `advance` в simulation режиме остается на реальном terminal (без override).
+  - fail-fast: если simulation включен и нужный sim terminal не задан, backend вернет HTTP 500 с понятной ошибкой по отсутствующему ENV.
+  - проверка маршрутизации: вызывайте `POST /api/azericard/initiate` и сверяйте `params.TERMINAL` в ответе.
+  - выключение/rollback: `AZERICARD_TERMINAL_SIMULATION_ENABLED=false` + restart сервиса.
 - Для Google Pay обязательно заполните:
   - `AZERICARD_GPAY_GATEWAY` (обычно `azericardgpay`)
   - `AZERICARD_GPAY_GATEWAY_MERCHANT_ID` (выдаётся Azericard; без него Google Pay выдаёт OR_BIBED_06)

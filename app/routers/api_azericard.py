@@ -110,7 +110,10 @@ def wallet_config():
 
 
 def _ensure_gateway_config(category: Optional[str] = None, terminal_group: Optional[str] = None) -> None:
-    tid = _terminal_id_for(category, terminal_group=terminal_group)
+    try:
+        tid = _terminal_id_for(category, terminal_group=terminal_group)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     if not tid:
         raise HTTPException(status_code=500, detail=f"AZERICARD_TERMINAL ({category or 'default'}) is not configured")
     _validate_public_url(settings.AZERICARD_CALLBACK_URL, "AZERICARD_CALLBACK_URL")
@@ -142,7 +145,10 @@ def _validate_public_url(value: str, env_name: str) -> None:
 
 
 def _ensure_signing_config(category: Optional[str] = None, terminal_group: Optional[str] = None) -> None:
-    tid = _terminal_id_for(category, terminal_group=terminal_group)
+    try:
+        tid = _terminal_id_for(category, terminal_group=terminal_group)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     if not tid:
         raise HTTPException(status_code=500, detail=f"AZERICARD_TERMINAL ({category or 'default'}) is not configured")
     from ..services.azericard import _private_key_raw, _mpi_public_key

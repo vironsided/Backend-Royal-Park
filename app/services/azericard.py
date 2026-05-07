@@ -73,6 +73,46 @@ def _normalize_terminal_id(value: str) -> str:
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+def _validated_sim_terminal_id(raw_value: str, env_name: str) -> str:
+    normalized = _normalize_terminal_id(raw_value)
+    if not normalized:
+        raise ValueError(
+            f"{env_name} must be configured with digits when AZERICARD_TERMINAL_SIMULATION_ENABLED=true"
+        )
+    return normalized
+
+
+def _simulated_terminal_id_for(category: Optional[str], terminal_group: Optional[str]) -> str:
+    if not settings.AZERICARD_TERMINAL_SIMULATION_ENABLED:
+        return ""
+
+    is_wallet = terminal_group == TERMINAL_GROUP_WALLET
+    if category == TERMINAL_CATEGORY_UTILITY:
+        if is_wallet:
+            return _validated_sim_terminal_id(
+                settings.AZERICARD_SIM_TERMINAL_WALLET_UTILITY,
+                "AZERICARD_SIM_TERMINAL_WALLET_UTILITY",
+            )
+        return _validated_sim_terminal_id(
+            settings.AZERICARD_SIM_TERMINAL_UTILITY,
+            "AZERICARD_SIM_TERMINAL_UTILITY",
+        )
+
+    if category == TERMINAL_CATEGORY_MAINTENANCE:
+        if is_wallet:
+            return _validated_sim_terminal_id(
+                settings.AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE,
+                "AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE",
+            )
+        return _validated_sim_terminal_id(
+            settings.AZERICARD_SIM_TERMINAL_MAINTENANCE,
+            "AZERICARD_SIM_TERMINAL_MAINTENANCE",
+        )
+
+    # Advance keeps real terminal mapping in simulation mode.
+    return ""
+
+
 def _wallet_terminal_id_for(category: Optional[str]) -> str:
     if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_TERMINAL_WALLET_UTILITY:
         return settings.AZERICARD_TERMINAL_WALLET_UTILITY
@@ -114,10 +154,21 @@ def _all_wallet_terminal_ids_normalized() -> frozenset[str]:
         n = _normalize_terminal_id(raw)
         if n:
             ids.add(n)
+    if settings.AZERICARD_TERMINAL_SIMULATION_ENABLED:
+        for raw in (
+            settings.AZERICARD_SIM_TERMINAL_WALLET_UTILITY,
+            settings.AZERICARD_SIM_TERMINAL_WALLET_MAINTENANCE,
+        ):
+            n = _normalize_terminal_id(raw)
+            if n:
+                ids.add(n)
     return frozenset(ids)
 
 
 def _terminal_id_for(category: Optional[str] = None, terminal_group: Optional[str] = None) -> str:
+    simulated = _simulated_terminal_id_for(category, terminal_group)
+    if simulated:
+        return simulated
     if terminal_group == TERMINAL_GROUP_WALLET:
         return _wallet_terminal_id_for(category)
     if category == TERMINAL_CATEGORY_UTILITY and settings.AZERICARD_TERMINAL_UTILITY:
