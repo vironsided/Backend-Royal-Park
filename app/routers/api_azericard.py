@@ -172,6 +172,38 @@ def _pick(data: dict[str, Any], *keys: str) -> str:
     return ""
 
 
+def _payload_dict(raw_payload: Optional[str]) -> dict[str, str]:
+    if not raw_payload:
+        return {}
+    try:
+        parsed = json.loads(raw_payload)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items()}
+
+
+def _terminal_group_for_transaction(tx: OnlineTransaction) -> str:
+    # Post-auth operations must be sent via the same terminal as the original auth transaction.
+    for raw_payload in (tx.callback_payload, tx.request_payload):
+        data = _payload_dict(raw_payload)
+        if not data:
+            continue
+        if _pick(data, "TERMINAL", "terminal"):
+            return _terminal_group_from_data(data)
+    return terminal_group_for_online_trtype(tx.trtype)
+
+
+def _terminal_id_for_transaction(tx: OnlineTransaction) -> str:
+    for raw_payload in (tx.callback_payload, tx.request_payload):
+        data = _payload_dict(raw_payload)
+        terminal_id = _pick(data, "TERMINAL", "terminal")
+        if terminal_id:
+            return terminal_id
+    return ""
+
+
 def _wants_html(request: Request) -> bool:
     accept = (request.headers.get("accept") or "").lower()
     return "text/html" in accept or "*/*" in accept
@@ -577,10 +609,10 @@ async def get_status(order_id: str, tran_trtype: Optional[str] = None, db: Sessi
                 db.commit()
 
     category = tx.terminal_category
-    group = terminal_group_for_online_trtype(tx.trtype)
+    group = _terminal_group_for_transaction(tx)
     _ensure_gateway_config(category, terminal_group=group)
 
-    terminal_id = _terminal_id_for(category, terminal_group=group)
+    terminal_id = _terminal_id_for_transaction(tx) or _terminal_id_for(category, terminal_group=group)
     payload = {
         "ORDER": tx.order_id,
         "TERMINAL": terminal_id,
@@ -615,10 +647,10 @@ async def _run_postauth_operation(payload: CompleteRequest, trtype: str, db: Ses
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
     category = tx.terminal_category
-    group = terminal_group_for_online_trtype(tx.trtype)
+    group = _terminal_group_for_transaction(tx)
     _ensure_gateway_config(category, terminal_group=group)
 
-    terminal_id = _terminal_id_for(category, terminal_group=group)
+    terminal_id = _terminal_id_for_transaction(tx) or _terminal_id_for(category, terminal_group=group)
     req = {
         "ORDER": payload.order_id,
         "AMOUNT": amount_to_gateway(payload.amount),
