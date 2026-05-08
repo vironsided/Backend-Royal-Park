@@ -355,6 +355,10 @@ def run_bootstrap_schema():
         """,
         "CREATE INDEX IF NOT EXISTS idx_sales_contracts_status ON sales_contracts(status);",
         "CREATE INDEX IF NOT EXISTS idx_sales_contracts_created_by ON sales_contracts(created_by_id);",
+        # Payment history indexes for resident portal filters
+        "CREATE INDEX IF NOT EXISTS idx_payments_resident_received_at ON payments(resident_id, received_at DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_online_tx_resident_created_at ON online_transactions(resident_id, created_at DESC);",
+        "CREATE INDEX IF NOT EXISTS idx_payment_apps_created_at ON payment_applications(created_at DESC);",
         # Backfill: for existing PaymentApplications without line distributions,
         # compute proportional splits and insert them.
         """

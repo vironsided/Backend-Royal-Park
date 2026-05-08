@@ -2,13 +2,14 @@
 API endpoint for resident dashboard data
 Returns JSON data for the resident's personal dashboard
 """
+import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Form
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, and_
 from datetime import datetime, date, timedelta
 from decimal import Decimal
-from typing import List, Optional
+from typing import Any, List, Optional
 from pydantic import BaseModel
 
 from ..database import get_db
@@ -18,11 +19,11 @@ from ..models import (
     Payment, PaymentApplication, PaymentApplicationLine, PaymentMethod,
     Notification, NotificationStatus, MeterReading,
     user_residents, PaymentLog,
-    Tariff, MeterType, CustomerType
+    Tariff, MeterType, CustomerType, Block
     , OnlineTransaction
 )
 from ..security import get_user_id_from_session
-from ..utils import now_baku, to_baku_datetime
+from ..utils import build_invoice_number, now_baku, to_baku_datetime
 
 
 router = APIRouter(prefix="/api/resident", tags=["resident-api"])
@@ -2196,6 +2197,664 @@ def get_resident_dashboard(
             active_notifications_count=active_notifications,
         ),
     )
+
+
+def _split_csv_filter(raw: Optional[str]) -> set[str]:
+    if not raw:
+        return set()
+    return {x.strip().lower() for x in raw.split(",") if x and x.strip()}
+
+
+def _parse_iso_date(raw: Optional[str]) -> Optional[date]:
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw.strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _dt_in_range(dt: Optional[datetime], date_from: Optional[date], date_to: Optional[date]) -> bool:
+    if not dt:
+        return True
+    d = to_baku_datetime(dt).date()
+    if date_from and d < date_from:
+        return False
+    if date_to and d > date_to:
+        return False
+    return True
+
+
+def _payload_dict(raw_payload: Optional[str]) -> dict[str, str]:
+    if not raw_payload:
+        return {}
+    try:
+        parsed = json.loads(raw_payload)
+    except Exception:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in parsed.items():
+        out[str(k)] = "" if v is None else str(v)
+    return out
+
+
+def _normalize_status_for_history(raw_status: Optional[str]) -> str:
+    normalized = (raw_status or "").strip().upper()
+    if normalized in {"CONFIRMED", "SUCCESS", "APPROVED"}:
+        return "confirmed"
+    if normalized in {"DECLINED", "FAILED", "CANCELLED"}:
+        return "declined"
+    if normalized in {"SIGNATURE_FAILED"}:
+        return "signature_failed"
+    if normalized in {"INITIATED", "PENDING"}:
+        return "initiated"
+    if normalized in {"ERROR"}:
+        return "error"
+    return "error"
+
+
+def _online_method_from_payloads(tx: OnlineTransaction) -> str:
+    req = _payload_dict(tx.request_payload)
+    cb = _payload_dict(tx.callback_payload)
+    merged = {**req, **cb}
+    terminal_hint = (merged.get("TERMINAL_GROUP") or "").strip().lower()
+    has_wallet = terminal_hint == "wallet" or bool(merged.get("GPAYTOKEN"))
+    if has_wallet:
+        if merged.get("EXT_MPI_ECI") or merged.get("TAVV"):
+            return "apple_pay"
+        return "google_pay"
+    return "bank_card"
+
+
+def _payment_method_to_history(method: PaymentMethod) -> str:
+    if method == PaymentMethod.CASH:
+        return "cash"
+    if method == PaymentMethod.CARD:
+        return "bank_card"
+    if method == PaymentMethod.TRANSFER:
+        return "transfer"
+    if method == PaymentMethod.ADVANCE:
+        return "advance_internal"
+    if method == PaymentMethod.ONLINE:
+        return "bank_card"
+    return "unknown"
+
+
+def _operation_type_for_payment(payment: Payment) -> str:
+    if payment.method == PaymentMethod.ADVANCE:
+        return "advance_writeoff"
+    if payment.method == PaymentMethod.ONLINE and not payment.applications:
+        return "advance_topup"
+    if payment.method in {PaymentMethod.CARD, PaymentMethod.TRANSFER, PaymentMethod.CASH} and not payment.applications:
+        return "advance_topup"
+    if payment.applications:
+        return "invoice_payment"
+    return "manual_adjustment"
+
+
+def _history_item_matches_filters(
+    item: dict[str, Any],
+    *,
+    statuses: set[str],
+    operation_types: set[str],
+    payment_methods: set[str],
+    categories: set[str],
+    resident_id: Optional[int],
+    q: Optional[str],
+) -> bool:
+    if statuses and item.get("status") not in statuses:
+        return False
+    if operation_types and item.get("operation_type") not in operation_types:
+        return False
+    if payment_methods and item.get("payment_method") not in payment_methods:
+        return False
+    if categories and (item.get("category") or "").lower() not in categories:
+        return False
+    if resident_id and int(item.get("resident_id") or 0) != int(resident_id):
+        return False
+
+    if q:
+        needle = q.strip().lower()
+        if needle:
+            hay = " ".join(
+                str(item.get(k) or "")
+                for k in (
+                    "order_id",
+                    "reference",
+                    "invoice_number",
+                    "resident_code",
+                    "status",
+                    "operation_type",
+                )
+            ).lower()
+            if needle not in hay:
+                return False
+
+    return True
+
+
+def _build_resident_maps(db: Session, resident_ids: list[int]) -> tuple[dict[int, str], dict[int, str]]:
+    rows = (
+        db.query(Resident.id, Resident.unit_number, Resident.block_id)
+        .filter(Resident.id.in_(resident_ids))
+        .all()
+    )
+    block_ids = [r.block_id for r in rows if r.block_id]
+    block_name_map = {}
+    if block_ids:
+        block_name_map = {
+            b.id: b.name
+            for b in db.query(Block).filter(Block.id.in_(block_ids)).all()
+        }
+
+    resident_code_map: dict[int, str] = {}
+    resident_label_map: dict[int, str] = {}
+    for rid, unit_number, block_id in rows:
+        block_name = block_name_map.get(block_id, "")
+        if block_name:
+            resident_code_map[int(rid)] = f"{block_name} / {unit_number}"
+            resident_label_map[int(rid)] = f"Блок {block_name}, №{unit_number}"
+        else:
+            resident_code_map[int(rid)] = str(unit_number or "")
+            resident_label_map[int(rid)] = f"№{unit_number}"
+    return resident_code_map, resident_label_map
+
+
+def _build_payment_history_entries(
+    db: Session,
+    resident_ids: list[int],
+    *,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    resident_code_map, resident_label_map = _build_resident_maps(db, resident_ids)
+
+    payments = (
+        db.query(Payment)
+        .filter(Payment.resident_id.in_(resident_ids))
+        .order_by(Payment.received_at.desc(), Payment.id.desc())
+        .all()
+    )
+    online_by_payment_id = {
+        int(tx.payment_id): tx
+        for tx in db.query(OnlineTransaction)
+        .filter(
+            OnlineTransaction.resident_id.in_(resident_ids),
+            OnlineTransaction.payment_id.isnot(None),
+        )
+        .all()
+        if tx.payment_id
+    }
+    for p in payments:
+        created_dt = to_baku_datetime(p.received_at)
+        if not _dt_in_range(created_dt, date_from, date_to):
+            continue
+        # ADVANCE write-offs are represented by PaymentApplication rows below.
+        if p.method == PaymentMethod.ADVANCE and p.applications:
+            continue
+
+        tx = online_by_payment_id.get(int(p.id))
+        method = _payment_method_to_history(p.method)
+        if tx and p.method == PaymentMethod.ONLINE:
+            method = _online_method_from_payloads(tx)
+
+        status = "confirmed"
+        if tx:
+            status = _normalize_status_for_history(tx.gateway_status)
+
+        first_app = p.applications[0] if p.applications else None
+        invoice_obj = first_app.invoice if first_app else None
+        invoice_number = None
+        invoice_period = None
+        if invoice_obj:
+            invoice_number = invoice_obj.number or build_invoice_number(
+                db,
+                invoice_obj.resident_id,
+                invoice_obj.period_year,
+                invoice_obj.period_month,
+            )
+            invoice_period = f"{invoice_obj.period_year}-{invoice_obj.period_month:02d}"
+
+        items.append(
+            {
+                "id": f"payment:{p.id}",
+                "source": "payment",
+                "source_id": int(p.id),
+                "created_at": created_dt.isoformat(),
+                "_created_sort": created_dt,
+                "resident_id": int(p.resident_id),
+                "resident_code": resident_code_map.get(int(p.resident_id), str(p.resident_id)),
+                "resident_label": resident_label_map.get(int(p.resident_id), str(p.resident_id)),
+                "amount": float(p.amount_total or 0),
+                "currency": "AZN",
+                "status": status,
+                "operation_type": _operation_type_for_payment(p),
+                "payment_method": method,
+                "category": (tx.terminal_category if tx else None),
+                "order_id": tx.order_id if tx else None,
+                "reference": p.reference,
+                "comment": p.comment,
+                "invoice_id": int(invoice_obj.id) if invoice_obj else None,
+                "invoice_number": invoice_number,
+                "invoice_period": invoice_period,
+                "applied_total": float(p.applied_total or 0),
+                "leftover": float(p.leftover or 0),
+            }
+        )
+
+    tx_rows = (
+        db.query(OnlineTransaction)
+        .filter(
+            OnlineTransaction.resident_id.in_(resident_ids),
+            OnlineTransaction.payment_id.is_(None),
+        )
+        .order_by(OnlineTransaction.created_at.desc(), OnlineTransaction.id.desc())
+        .all()
+    )
+    for tx in tx_rows:
+        created_dt = to_baku_datetime(tx.created_at)
+        if not _dt_in_range(created_dt, date_from, date_to):
+            continue
+
+        invoice = tx.invoice
+        invoice_number = None
+        invoice_period = None
+        if invoice:
+            invoice_number = invoice.number or build_invoice_number(
+                db,
+                invoice.resident_id,
+                invoice.period_year,
+                invoice.period_month,
+            )
+            invoice_period = f"{invoice.period_year}-{invoice.period_month:02d}"
+
+        items.append(
+            {
+                "id": f"tx:{tx.id}",
+                "source": "online_transaction",
+                "source_id": int(tx.id),
+                "created_at": created_dt.isoformat(),
+                "_created_sort": created_dt,
+                "resident_id": int(tx.resident_id or 0),
+                "resident_code": resident_code_map.get(int(tx.resident_id or 0), str(tx.resident_id or "")),
+                "resident_label": resident_label_map.get(int(tx.resident_id or 0), str(tx.resident_id or "")),
+                "amount": float(tx.amount_total or 0),
+                "currency": tx.currency or "AZN",
+                "status": _normalize_status_for_history(tx.gateway_status),
+                "operation_type": "advance_topup" if not tx.invoice_id else "invoice_payment",
+                "payment_method": _online_method_from_payloads(tx),
+                "category": tx.terminal_category,
+                "order_id": tx.order_id,
+                "reference": tx.order_id,
+                "comment": None,
+                "invoice_id": int(tx.invoice_id) if tx.invoice_id else None,
+                "invoice_number": invoice_number,
+                "invoice_period": invoice_period,
+                "applied_total": 0.0,
+                "leftover": 0.0,
+            }
+        )
+
+    advance_apps = (
+        db.query(PaymentApplication, Payment, Invoice)
+        .join(Payment, Payment.id == PaymentApplication.payment_id)
+        .outerjoin(Invoice, Invoice.id == PaymentApplication.invoice_id)
+        .filter(
+            Payment.resident_id.in_(resident_ids),
+            or_(
+                PaymentApplication.reference.like("ADVANCE%"),
+                PaymentApplication.reference.like("AUTOADV%"),
+            ),
+        )
+        .order_by(PaymentApplication.created_at.desc(), PaymentApplication.id.desc())
+        .all()
+    )
+    for app, payment, invoice in advance_apps:
+        created_dt = to_baku_datetime(app.created_at)
+        if not _dt_in_range(created_dt, date_from, date_to):
+            continue
+        invoice_number = None
+        invoice_period = None
+        if invoice:
+            invoice_number = invoice.number or build_invoice_number(
+                db,
+                invoice.resident_id,
+                invoice.period_year,
+                invoice.period_month,
+            )
+            invoice_period = f"{invoice.period_year}-{invoice.period_month:02d}"
+
+        is_auto = (app.reference or "").startswith("AUTOADV")
+        items.append(
+            {
+                "id": f"advance:{app.id}",
+                "source": "advance_application",
+                "source_id": int(app.id),
+                "created_at": created_dt.isoformat(),
+                "_created_sort": created_dt,
+                "resident_id": int(payment.resident_id),
+                "resident_code": resident_code_map.get(int(payment.resident_id), str(payment.resident_id)),
+                "resident_label": resident_label_map.get(int(payment.resident_id), str(payment.resident_id)),
+                "amount": float(app.amount_applied or 0),
+                "currency": "AZN",
+                "status": "confirmed",
+                "operation_type": "advance_writeoff",
+                "payment_method": "advance_internal",
+                "category": "advance",
+                "order_id": None,
+                "reference": app.reference,
+                "comment": "auto" if is_auto else "manual",
+                "invoice_id": int(invoice.id) if invoice else None,
+                "invoice_number": invoice_number,
+                "invoice_period": invoice_period,
+                "applied_total": float(app.amount_applied or 0),
+                "leftover": 0.0,
+            }
+        )
+
+    items.sort(key=lambda x: (x["_created_sort"], x["id"]), reverse=True)
+    for item in items:
+        item.pop("_created_sort", None)
+    return items
+
+
+@router.get("/payment-history")
+def get_payment_history(
+    request: Request,
+    page: int = 1,
+    per_page: int = 25,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    status: Optional[str] = None,
+    operation_type: Optional[str] = None,
+    payment_method: Optional[str] = None,
+    category: Optional[str] = None,
+    resident_id: Optional[int] = None,
+    q: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    user_id = get_user_id_from_session(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+
+    resident_ids = [
+        r[0]
+        for r in db.query(user_residents.c.resident_id)
+        .filter(user_residents.c.user_id == user.id)
+        .all()
+    ]
+    if not resident_ids:
+        return {
+            "items": [],
+            "summary": {
+                "total_operations": 0,
+                "total_amount": 0.0,
+                "total_confirmed": 0.0,
+                "total_failed": 0.0,
+                "total_topup": 0.0,
+                "total_invoice_paid": 0.0,
+                "total_advance_writeoff": 0.0,
+            },
+            "pagination": {"page": 1, "per_page": per_page, "pages": 0, "total": 0},
+        }
+
+    if resident_id and resident_id not in resident_ids:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    per_page = max(1, min(int(per_page or 25), 100))
+    page = max(1, int(page or 1))
+    dt_from = _parse_iso_date(date_from)
+    dt_to = _parse_iso_date(date_to)
+
+    statuses = _split_csv_filter(status)
+    op_types = _split_csv_filter(operation_type)
+    methods = _split_csv_filter(payment_method)
+    categories = _split_csv_filter(category)
+
+    all_items = _build_payment_history_entries(
+        db=db,
+        resident_ids=resident_ids,
+        date_from=dt_from,
+        date_to=dt_to,
+    )
+    filtered_items = [
+        item
+        for item in all_items
+        if _history_item_matches_filters(
+            item,
+            statuses=statuses,
+            operation_types=op_types,
+            payment_methods=methods,
+            categories=categories,
+            resident_id=resident_id,
+            q=q,
+        )
+    ]
+
+    total = len(filtered_items)
+    pages = max(1, (total + per_page - 1) // per_page) if total else 0
+    if pages and page > pages:
+        page = pages
+    start = (page - 1) * per_page if pages else 0
+    end = start + per_page if pages else 0
+    page_items = filtered_items[start:end] if pages else []
+
+    summary_total = sum(float(i.get("amount") or 0) for i in filtered_items)
+    summary_confirmed = sum(
+        float(i.get("amount") or 0)
+        for i in filtered_items
+        if i.get("status") == "confirmed"
+    )
+    summary_failed = sum(
+        float(i.get("amount") or 0)
+        for i in filtered_items
+        if i.get("status") in {"declined", "signature_failed", "error"}
+    )
+    summary_topup = sum(
+        float(i.get("amount") or 0)
+        for i in filtered_items
+        if i.get("operation_type") == "advance_topup"
+    )
+    summary_invoice_paid = sum(
+        float(i.get("amount") or 0)
+        for i in filtered_items
+        if i.get("operation_type") == "invoice_payment"
+    )
+    summary_advance_writeoff = sum(
+        float(i.get("amount") or 0)
+        for i in filtered_items
+        if i.get("operation_type") == "advance_writeoff"
+    )
+
+    return {
+        "items": page_items,
+        "summary": {
+            "total_operations": total,
+            "total_amount": round(summary_total, 2),
+            "total_confirmed": round(summary_confirmed, 2),
+            "total_failed": round(summary_failed, 2),
+            "total_topup": round(summary_topup, 2),
+            "total_invoice_paid": round(summary_invoice_paid, 2),
+            "total_advance_writeoff": round(summary_advance_writeoff, 2),
+        },
+        "pagination": {
+            "page": page if pages else 1,
+            "per_page": per_page,
+            "pages": pages,
+            "total": total,
+        },
+    }
+
+
+@router.get("/payment-history/{entry_id}")
+def get_payment_history_detail(
+    entry_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user_id = get_user_id_from_session(request)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    resident_ids = {
+        r[0]
+        for r in db.query(user_residents.c.resident_id)
+        .filter(user_residents.c.user_id == user.id)
+        .all()
+    }
+
+    if ":" not in entry_id:
+        raise HTTPException(status_code=400, detail="Invalid history id")
+    prefix, raw_id = entry_id.split(":", 1)
+    try:
+        obj_id = int(raw_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid history id")
+
+    if prefix == "payment":
+        payment = db.get(Payment, obj_id)
+        if not payment:
+            raise HTTPException(status_code=404, detail="Not found")
+        if payment.resident_id not in resident_ids:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        tx = (
+            db.query(OnlineTransaction)
+            .filter(OnlineTransaction.payment_id == payment.id)
+            .order_by(OnlineTransaction.id.desc())
+            .first()
+        )
+        apps = []
+        for app in payment.applications or []:
+            inv = app.invoice
+            apps.append(
+                {
+                    "application_id": int(app.id),
+                    "invoice_id": int(inv.id) if inv else None,
+                    "invoice_number": (
+                        inv.number
+                        if inv
+                        else None
+                    ),
+                    "invoice_period": (
+                        f"{inv.period_year}-{inv.period_month:02d}" if inv else None
+                    ),
+                    "amount_applied": float(app.amount_applied or 0),
+                    "reference": app.reference,
+                }
+            )
+        return {
+            "id": entry_id,
+            "source": "payment",
+            "payment": {
+                "id": payment.id,
+                "resident_id": payment.resident_id,
+                "amount_total": float(payment.amount_total or 0),
+                "method": payment.method.value,
+                "reference": payment.reference,
+                "comment": payment.comment,
+                "received_at": to_baku_datetime(payment.received_at).isoformat(),
+                "applied_total": float(payment.applied_total or 0),
+                "leftover": float(payment.leftover or 0),
+            },
+            "gateway": (
+                {
+                    "order_id": tx.order_id,
+                    "status": tx.gateway_status,
+                    "terminal_category": tx.terminal_category,
+                    "rrn": tx.rrn,
+                    "int_ref": tx.int_ref,
+                    "approval": tx.approval,
+                    "action_code": tx.action_code,
+                    "rc": tx.rc,
+                }
+                if tx
+                else None
+            ),
+            "applications": apps,
+        }
+
+    if prefix == "tx":
+        tx = db.get(OnlineTransaction, obj_id)
+        if not tx:
+            raise HTTPException(status_code=404, detail="Not found")
+        if int(tx.resident_id or 0) not in resident_ids:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        req_payload = _payload_dict(tx.request_payload)
+        cb_payload = _payload_dict(tx.callback_payload)
+        return {
+            "id": entry_id,
+            "source": "online_transaction",
+            "transaction": {
+                "id": tx.id,
+                "order_id": tx.order_id,
+                "resident_id": tx.resident_id,
+                "invoice_id": tx.invoice_id,
+                "amount_total": float(tx.amount_total or 0),
+                "currency": tx.currency,
+                "gateway_status": tx.gateway_status,
+                "terminal_category": tx.terminal_category,
+                "trtype": tx.trtype,
+                "rrn": tx.rrn,
+                "int_ref": tx.int_ref,
+                "approval": tx.approval,
+                "action_code": tx.action_code,
+                "rc": tx.rc,
+                "created_at": to_baku_datetime(tx.created_at).isoformat(),
+                "updated_at": to_baku_datetime(tx.updated_at).isoformat() if tx.updated_at else None,
+                "wallet_method_guess": _online_method_from_payloads(tx),
+            },
+            "request_payload": req_payload,
+            "callback_payload": cb_payload,
+        }
+
+    if prefix == "advance":
+        app_row = db.get(PaymentApplication, obj_id)
+        if not app_row:
+            raise HTTPException(status_code=404, detail="Not found")
+        payment = db.get(Payment, app_row.payment_id)
+        if not payment or payment.resident_id not in resident_ids:
+            raise HTTPException(status_code=403, detail="Forbidden")
+        invoice = db.get(Invoice, app_row.invoice_id) if app_row.invoice_id else None
+        lines_out = []
+        real_lines = (
+            db.query(PaymentApplicationLine, InvoiceLine)
+            .join(InvoiceLine, InvoiceLine.id == PaymentApplicationLine.invoice_line_id)
+            .filter(PaymentApplicationLine.application_id == app_row.id)
+            .all()
+        )
+        if real_lines:
+            for pal, il in real_lines:
+                lines_out.append(
+                    {
+                        "description": il.description,
+                        "amount_total": float(il.amount_total or 0),
+                        "applied_share": float(pal.amount or 0),
+                    }
+                )
+        return {
+            "id": entry_id,
+            "source": "advance_application",
+            "application": {
+                "id": app_row.id,
+                "payment_id": app_row.payment_id,
+                "invoice_id": app_row.invoice_id,
+                "invoice_number": invoice.number if invoice else None,
+                "amount_applied": float(app_row.amount_applied or 0),
+                "reference": app_row.reference,
+                "created_at": to_baku_datetime(app_row.created_at).isoformat(),
+            },
+            "lines": lines_out,
+        }
+
+    raise HTTPException(status_code=404, detail="Not found")
 
 
 # ---------------------------------------------------------------------------
