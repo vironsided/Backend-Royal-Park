@@ -408,3 +408,24 @@ def create_news_notification(db, news):
     except Exception as e:
         db.rollback()
         print(f"Error creating news notifications: {e}")
+
+
+# audit F-14: validate uploads by real magic bytes, not the client content-type
+# header. Supports JPEG / PNG / WEBP / GIF / HEIC|HEIF (iPhone photos).
+IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def looks_like_image(data: bytes) -> bool:
+    if not data or len(data) < 12:
+        return False
+    if data[:3] == b"\xff\xd8\xff":              # JPEG
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":          # PNG
+        return True
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":  # WEBP
+        return True
+    if data[:4] == b"GIF8":                       # GIF
+        return True
+    if data[4:8] == b"ftyp":                      # HEIC/HEIF/ISO-BMFF
+        return True
+    return False

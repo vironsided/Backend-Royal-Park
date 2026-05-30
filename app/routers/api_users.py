@@ -10,7 +10,7 @@ from ..database import get_db
 from ..models import User, RoleEnum
 from ..deps import get_current_user, can_manage_user
 from ..security import hash_password, verify_password, get_user_id_from_session
-from ..utils import generate_temp_password, to_baku_datetime
+from ..utils import generate_temp_password, to_baku_datetime, looks_like_image, IMAGE_MAX_UPLOAD_BYTES
 
 
 router = APIRouter(prefix="/api/users", tags=["users-api"])
@@ -153,11 +153,15 @@ def _save_avatar(file: UploadFile, user_id: int) -> str | None:
     if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
         return None
     ext = ".jpg" if file.content_type == "image/jpeg" else (".png" if file.content_type == "image/png" else ".webp")
+    data = file.file.read()
+    # audit F-14: enforce a size limit and validate real image bytes (don't trust header).
+    if not data or len(data) > IMAGE_MAX_UPLOAD_BYTES or not looks_like_image(data):
+        raise HTTPException(status_code=400, detail="Недопустимый файл изображения")
     base_dir = pathlib.Path("uploads/avatars") / str(user_id)
     base_dir.mkdir(parents=True, exist_ok=True)
     path = base_dir / f"avatar{ext}"
     with open(path, "wb") as f:
-        f.write(file.file.read())
+        f.write(data)
     rel_path = f"/uploads/avatars/{user_id}/avatar{ext}"
     return rel_path
 

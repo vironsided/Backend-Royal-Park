@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, exists
 
 from ..database import get_db
+from ..utils import looks_like_image, IMAGE_MAX_UPLOAD_BYTES
 from ..models import (
     User, RoleEnum, Block, Resident, ResidentMeter,
     MeterType, Tariff, MeterReading, ReadingLog, MeterReadingPhoto,
@@ -1357,6 +1358,9 @@ def upload_meter_photo(
     raw_bytes = file.file.read()
     if not raw_bytes:
         raise HTTPException(status_code=400, detail="Empty image file")
+    # audit F-14: size limit + real-image validation (don't trust content-type header).
+    if len(raw_bytes) > IMAGE_MAX_UPLOAD_BYTES or not looks_like_image(raw_bytes):
+        raise HTTPException(status_code=400, detail="Invalid image file")
 
     processed_bytes, processed_ext = _compress_meter_photo_if_needed(raw_bytes, ext)
     filename = f"{meter_id}_{reading.id}_{uuid4().hex}{processed_ext}"
