@@ -1,9 +1,14 @@
 import os
+import logging
 from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.exception_handlers import http_exception_handler
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import JSONResponse
+
+logger = logging.getLogger("royalpark")
 from sqlalchemy.orm import Session
 from .config import settings
 from .database import Base, engine, SessionLocal
@@ -447,6 +452,22 @@ def create_app() -> FastAPI:
                 if not allowed:
                     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
         return await call_next(request)
+
+    # audit F-15: never leak internal error text / tracebacks to clients. Any 5xx
+    # (incl. explicit HTTPException(500, detail=str(e)) scattered in routers) is
+    # logged server-side and returned to the client as a generic message. 4xx keep
+    # their (intentional) detail.
+    @app.exception_handler(StarletteHTTPException)
+    async def _sanitize_http_exception(request: Request, exc: StarletteHTTPException):
+        if exc.status_code >= 500:
+            logger.error("5xx on %s %s: %s", request.method, request.url.path, exc.detail)
+            return JSONResponse(status_code=exc.status_code, content={"detail": "Internal server error"})
+        return await http_exception_handler(request, exc)
+
+    @app.exception_handler(Exception)
+    async def _sanitize_unhandled(request: Request, exc: Exception):
+        logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 

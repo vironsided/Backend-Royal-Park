@@ -819,16 +819,14 @@ def set_default_card(card_id: int, request: Request, db: Session = Depends(get_d
 
 
 def _get_session_user_id(request: Request) -> Optional[int]:
-    """Extract user_id from session (works with SessionMiddleware)."""
-    session = getattr(request, "session", None)
-    if session:
-        uid = session.get("user_id")
-        if uid is not None:
-            try:
-                return int(uid)
-            except (ValueError, TypeError):
-                pass
-    return None
+    """Extract user_id from the real signed session (cookie/bearer).
+
+    audit F-18: this previously read request.session (Starlette SessionMiddleware),
+    which login never populates — so saved-cards endpoints always returned 401 for
+    real users. Use the same session reader as the rest of the app.
+    """
+    from ..security import get_user_id_from_session
+    return get_user_id_from_session(request)
 
 
 @router.get("/success", response_class=HTMLResponse)

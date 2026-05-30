@@ -1,5 +1,6 @@
+import os
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -12,6 +13,16 @@ from ..security import hash_password
 
 
 router = APIRouter(prefix="/api/qr", tags=["qr-api"])
+
+# audit F-13: QR tokens previously never expired. Finite, configurable TTL.
+QR_TOKEN_TTL_MINUTES = int(os.getenv("QR_TOKEN_TTL_MINUTES", "1440"))  # 24h default
+
+
+def _qr_token_expired(qr_token: QRToken) -> bool:
+    created = getattr(qr_token, "created_at", None)
+    if not created:
+        return False
+    return (datetime.utcnow() - created) > timedelta(minutes=QR_TOKEN_TTL_MINUTES)
 
 
 class QRTokenGenerateResponse(BaseModel):
@@ -137,6 +148,12 @@ def verify_qr_token(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Токен уже использован"
         )
+
+    if _qr_token_expired(qr_token):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Срок действия токена истёк"
+        )
     
     user = db.get(User, qr_token.user_id)
     if not user:
@@ -177,6 +194,12 @@ def change_password_via_qr(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Токен уже использован"
+        )
+
+    if _qr_token_expired(qr_token):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Срок действия токена истёк"
         )
     
     # Проверяем пароли
