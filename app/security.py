@@ -1,3 +1,4 @@
+import os
 import re
 from passlib.context import CryptContext
 from itsdangerous import URLSafeTimedSerializer
@@ -23,6 +24,13 @@ def validate_password_strength(password: str) -> None:
 
 
 def _use_cross_site_cookie() -> bool:
+    # audit F-11: with the same-origin proxy the cookie is first-party, so it
+    # should be SameSite=Lax. Allow an explicit override for deploys.
+    override = os.getenv("COOKIE_SAMESITE", "").strip().lower()
+    if override in {"lax", "strict"}:
+        return False
+    if override == "none":
+        return True
     frontend = (settings.FRONTEND_BASE_URL or "").strip().lower()
     if not frontend.startswith("https://"):
         return False
