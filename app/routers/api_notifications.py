@@ -426,6 +426,13 @@ def get_notification(
     current_user: User = Depends(get_current_user),
 ):
     """Получить одно уведомление по ID (требует авторизации)."""
+    # IDOR guard (audit F-08): a RESIDENT may only access their own notification;
+    # staff may access any. Check ownership BEFORE _get_notification marks it read.
+    owner = db.query(Notification.user_id).filter(Notification.id == notification_id).first()
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    if current_user.role not in (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR) and owner[0] != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
     notif = _get_notification_internal(db, notification_id, mark_read=mark_read)
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -460,6 +467,9 @@ def patch_notification(
     notif = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
+    # IDOR guard (audit F-08): residents may only touch their own notifications.
+    if current_user.role not in (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR) and notif.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
 
     snap_wf = notif.appeal_workflow
     snap_msg = notif.staff_message
@@ -595,10 +605,13 @@ def delete_notification(
     notif = db.query(Notification).filter(Notification.id == notification_id).first()
     if not notif:
         raise HTTPException(status_code=404, detail="Notification not found")
-    
+    # IDOR guard (audit F-08): residents may only delete their own notifications.
+    if current_user.role not in (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR) and notif.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
     db.delete(notif)
     db.commit()
-    
+
     return {"ok": True, "message": "Notification deleted"}
 
 

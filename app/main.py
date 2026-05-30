@@ -1,13 +1,15 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.responses import JSONResponse
 from sqlalchemy.orm import Session
 from .config import settings
 from .database import Base, engine, SessionLocal
 from .models import User, RoleEnum
-from .security import hash_password
+from .security import hash_password, get_user_id_from_session
+from .deps import require_any_role
 from .routers import auth_routes, dashboard, api_users, api_blocks, api_tariffs, api_residents, api_readings, api_tenants, api_invoices, api_payments, api_notifications, api_dashboard, api_logs, api_qr, api_payment, api_resident_dashboard, api_news, api_azericard, api_sales, push_routes
 
 
@@ -411,18 +413,54 @@ def create_app() -> FastAPI:
         expose_headers=["*"],
     )
 
+    # --- Security gate: legacy "/public" backdoor routes (audit F-01..F-04) ---
+    # The codebase shipped dozens of `*/public` endpoints with NO authentication
+    # (anonymous CRUD over residents/payments/tariffs/tenants/readings, password
+    # reset, QR token generation). The frontend never calls those CRUD clones —
+    # only the admin notifications feed and the public news feed legitimately use
+    # a "public" path. This centralized middleware blocks any request whose path
+    # contains a "public" segment unless (a) it is on the anonymous allowlist, or
+    # (b) it carries a valid STAFF session. Closes the whole class in one place.
+    ANON_PUBLIC_ALLOW = {"/api/news/public"}
+    STAFF_ROLES = {RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR, RoleEnum.SALES}
+
+    @app.middleware("http")
+    async def block_legacy_public_routes(request: Request, call_next):
+        if request.method != "OPTIONS":
+            path = request.url.path.rstrip("/") or "/"
+            if "public" in path.split("/") and path not in ANON_PUBLIC_ALLOW:
+                allowed = False
+                uid = get_user_id_from_session(request)
+                if uid is not None:
+                    db = SessionLocal()
+                    try:
+                        u = db.get(User, uid)
+                        allowed = bool(u and u.is_active and u.role in STAFF_ROLES)
+                    finally:
+                        db.close()
+                if not allowed:
+                    return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+        return await call_next(request)
+
     app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+    # Staff-only routers (audit F-08): these manage all residents/billing data and
+    # are NEVER called by the resident panel (resident data flows through
+    # api_resident_dashboard). Gate the whole router so a logged-in RESIDENT can't
+    # enumerate/mutate other people's data. Any non-resident staff role is allowed.
+    staff_only = [Depends(require_any_role(
+        RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR, RoleEnum.SALES))]
 
     app.include_router(auth_routes.router)
     app.include_router(dashboard.router)
     app.include_router(api_users.router)
     app.include_router(api_blocks.router)
-    app.include_router(api_tariffs.router)
-    app.include_router(api_residents.router)
-    app.include_router(api_readings.router)
-    app.include_router(api_tenants.router)
-    app.include_router(api_invoices.router)
-    app.include_router(api_payments.router)
+    app.include_router(api_tariffs.router, dependencies=staff_only)
+    app.include_router(api_residents.router, dependencies=staff_only)
+    app.include_router(api_readings.router, dependencies=staff_only)
+    app.include_router(api_tenants.router, dependencies=staff_only)
+    app.include_router(api_invoices.router, dependencies=staff_only)
+    app.include_router(api_payments.router, dependencies=staff_only)
     app.include_router(api_notifications.router)
     app.include_router(api_dashboard.router)
     app.include_router(api_logs.router)

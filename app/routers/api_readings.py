@@ -688,6 +688,7 @@ def delete_meter_photo_for_reading(db: Session, reading_id: int) -> None:
 @router.get("/")
 def list_readings(
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     block_id: Optional[int] = Query(None),
     resident_id: Optional[int] = Query(None),
     meter_type: Optional[List[str]] = Query(None),
@@ -1057,6 +1058,7 @@ def list_readings(
 def get_resident_meters(
     resident_id: int,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     date: Optional[str] = Query(default=None, description="YYYY-MM-DD для режима редактирования"),
 ):
     """
