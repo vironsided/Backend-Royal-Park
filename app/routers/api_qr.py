@@ -186,12 +186,12 @@ def change_password_via_qr(
             detail="Пароли не совпадают"
         )
     
-    if len(payload.new_password) < 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Пароль должен быть не менее 6 символов"
-        )
-    
+    from ..security import validate_password_strength
+    try:
+        validate_password_strength(payload.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     user = db.get(User, qr_token.user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")

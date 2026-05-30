@@ -6,11 +6,41 @@ from starlette import status
 from pydantic import BaseModel
 from ..database import get_db
 from ..models import User, RoleEnum
-from ..security import verify_password, set_session, clear_session, make_session_token
+from ..security import verify_password, set_session, clear_session, make_session_token, validate_password_strength
 from ..deps import get_current_user
 from ..frontend import redirect_frontend, redirect_admin
 
+import os
+import time as _time
+from collections import defaultdict
+
 router = APIRouter()
+
+# audit F-10: lightweight in-memory anti-bruteforce on login (per IP+username).
+# Failed attempts accumulate; a successful login clears the bucket. Note: in-memory
+# is per-process — for multi-worker prod move to Redis. Tunable via env.
+_LOGIN_RL_WINDOW = int(os.getenv("LOGIN_RL_WINDOW_SEC", "300"))   # 5 minutes
+_LOGIN_RL_MAX = int(os.getenv("LOGIN_RL_MAX_ATTEMPTS", "10"))
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+
+
+def _login_rate_limited(key: str) -> bool:
+    now = _time.time()
+    bucket = _login_attempts[key]
+    cutoff = now - _LOGIN_RL_WINDOW
+    bucket[:] = [t for t in bucket if t > cutoff]
+    if len(bucket) >= _LOGIN_RL_MAX:
+        return True
+    bucket.append(now)
+    return False
+
+
+def _login_rl_clear(key: str) -> None:
+    _login_attempts.pop(key, None)
+
+
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else None) or "unknown"
 
 
 class LoginRequest(BaseModel):
@@ -35,10 +65,14 @@ def login_form():
 @router.post("/login")
 def login(request: Request, db: Session = Depends(get_db),
           username: str = Form(...), password: str = Form(...)):
+    rl_key = f"{_client_ip(request)}:{username}"
+    if _login_rate_limited(rl_key):
+        return redirect_frontend("/", {"error": "too_many_attempts"})
     user = db.query(User).filter(User.username == username).first()
     if not user or not verify_password(password, user.password_hash) or not user.is_active:
         return redirect_frontend("/", {"error": "invalid_credentials"})
 
+    _login_rl_clear(rl_key)
     user.last_login_at = datetime.utcnow()
     db.commit()
 
@@ -55,16 +89,23 @@ def login(request: Request, db: Session = Depends(get_db),
 
 
 @router.post("/api/auth/login", response_model=LoginResponse)
-async def api_login(login_data: LoginRequest, db: Session = Depends(get_db)):
+async def api_login(login_data: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """API endpoint для логина, возвращает роль пользователя и устанавливает сессию"""
+    rl_key = f"{_client_ip(request)}:{login_data.username}"
+    if _login_rate_limited(rl_key):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Слишком много попыток входа. Попробуйте позже."
+        )
     user = db.query(User).filter(User.username == login_data.username).first()
-    
+
     if not user or not verify_password(login_data.password, user.password_hash) or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Неверное имя пользователя или пароль"
         )
-    
+
+    _login_rl_clear(rl_key)
     user.last_login_at = datetime.utcnow()
     db.commit()
     
@@ -106,8 +147,10 @@ async def api_force_change_password(
     if payload.new_password != payload.confirm_password:
         raise HTTPException(status_code=400, detail="Пароли не совпадают")
 
-    if len(payload.new_password) < 6:
-        raise HTTPException(status_code=400, detail="Пароль должен быть не менее 6 символов")
+    try:
+        validate_password_strength(payload.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     full_name = (payload.full_name or "").strip()
     phone = (payload.phone or "").strip()

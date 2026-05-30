@@ -255,12 +255,12 @@ def change_current_user_password(
             detail="Неверный текущий пароль"
         )
     
-    if len(payload.new_password) < 6:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Пароль должен быть не менее 6 символов"
-        )
-    
+    from ..security import validate_password_strength
+    try:
+        validate_password_strength(payload.new_password)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     user.password_hash = hash_password(payload.new_password)
     user.require_password_change = False
     user.temp_password_plain = None

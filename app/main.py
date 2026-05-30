@@ -35,7 +35,10 @@ def init_db():
         # Создаётся один раз; дальше новых "продажников" можно заводить из админки.
         satish = db.query(User).filter(User.username == "satish").first()
         if not satish:
-            satish_temp_password = "Satish123!"
+            # audit 7.11: no hardcoded password in source. Use SATISH_PASSWORD env or
+            # a random temp; require_password_change=True forces a reset on first login.
+            import secrets
+            satish_temp_password = os.getenv("SATISH_PASSWORD") or secrets.token_urlsafe(9)
             satish = User(
                 username="satish",
                 password_hash=hash_password(satish_temp_password),
@@ -406,7 +409,10 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=allow_origins,
-        allow_origin_regex=r"^https?://((localhost|127\.0\.0\.1)(:\d+)?|[a-zA-Z0-9-]+\.up\.railway\.app)$",
+        # audit F-07: previously trusted ANY *.up.railway.app (shared platform) with
+        # credentials. Now only localhost (dev) + the explicit FRONTEND_BASE_URL in
+        # allow_origins above. Set FRONTEND_BASE_URL in prod to your frontend domain.
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

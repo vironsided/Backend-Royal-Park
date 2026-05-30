@@ -1,11 +1,25 @@
+import re
 from passlib.context import CryptContext
-from itsdangerous import URLSafeSerializer
+from itsdangerous import URLSafeTimedSerializer
 from starlette.requests import Request
 from starlette.responses import Response
 from .config import settings
 
 pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
-serializer = URLSafeSerializer(settings.SESSION_SECRET_KEY, salt="session-salt")
+
+# audit F-06: the signed session token now carries a timestamp and is verified
+# with max_age, so a stolen/leaked token is not valid forever (matches cookie TTL).
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 8  # 8 hours
+serializer = URLSafeTimedSerializer(settings.SESSION_SECRET_KEY, salt="session-salt")
+
+
+def validate_password_strength(password: str) -> None:
+    """audit F-12: единая парольная политика. Бросает ValueError при нарушении."""
+    pw = password or ""
+    if len(pw) < 10:
+        raise ValueError("Пароль должен быть не менее 10 символов")
+    if not re.search(r"[A-Za-zА-Яа-яƏəÖöÜüÇçĞğŞşİı]", pw) or not re.search(r"\d", pw):
+        raise ValueError("Пароль должен содержать и буквы, и цифры")
 
 
 def _use_cross_site_cookie() -> bool:
@@ -67,7 +81,7 @@ def get_user_id_from_session(request: Request) -> int | None:
     if not token:
         return None
     try:
-        data = serializer.loads(token)
+        data = serializer.loads(token, max_age=SESSION_MAX_AGE_SECONDS)
         return int(data.get("user_id"))
     except Exception:
         return None

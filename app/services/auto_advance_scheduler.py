@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 from datetime import timedelta
@@ -25,9 +26,10 @@ from ..models import (
 from ..routers.api_payment_logic import auto_apply_advance
 from ..utils import now_baku, to_baku_datetime
 
-# TEMP: shorter values for testing
-AUTO_ADVANCE_CHECK_INTERVAL_SEC = 10
-AUTO_ADVANCE_GRACE_SECONDS = 3 * 24 * 60 * 60
+# audit: were hardcoded "TEMP" test values (10s poll). Now env-driven with sane
+# production defaults so the loop doesn't hammer the DB every 10 seconds.
+AUTO_ADVANCE_CHECK_INTERVAL_SEC = int(os.getenv("AUTO_ADVANCE_CHECK_INTERVAL_SEC", "300"))
+AUTO_ADVANCE_GRACE_SECONDS = int(os.getenv("AUTO_ADVANCE_GRACE_SECONDS", str(3 * 24 * 60 * 60)))
 
 _scheduler_thread: threading.Thread | None = None
 _stop_event = threading.Event()
