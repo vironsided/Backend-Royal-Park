@@ -24,7 +24,9 @@ class QRTokenVerifyResponse(BaseModel):
     valid: bool
     user_id: int
     username: str
-    temp_password: str
+    # audit F-03/F-09: NEVER transport the plaintext temporary password via API.
+    # The QR setup page sets a brand-new password using the one-time token; it
+    # does not need (and never read) the existing temp password.
     full_name: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
@@ -150,7 +152,6 @@ def verify_qr_token(
         valid=True,
         user_id=user.id,
         username=user.username,
-        temp_password=user.temp_password_plain,
         full_name=user.full_name,
         phone=user.phone,
         email=user.email,

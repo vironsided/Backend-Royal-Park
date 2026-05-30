@@ -14,7 +14,10 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Invoice, OnlineTransaction, Payment, PaymentApplication, PaymentLog, PaymentMethod, Resident
+from ..models import Invoice, OnlineTransaction, Payment, PaymentApplication, PaymentLog, PaymentMethod, Resident, User, RoleEnum
+from ..deps import get_current_user, require_any_role
+
+_AZ_STAFF_ROLES = (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR, RoleEnum.SALES)
 from ..utils import now_baku
 from ..services.azericard import (
     CALLBACK_SIGN_FIELDS,
@@ -313,10 +316,19 @@ def initiate_payment(
     request: Request,
     payload: InitiateRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     resident = db.get(Resident, payload.resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
+
+    # Ownership (audit F-04): a RESIDENT may only pay for a resident linked to their
+    # own account; staff may initiate on behalf of anyone. Previously this endpoint
+    # was anonymous and accepted any resident_id from the request body.
+    if current_user.role not in _AZ_STAFF_ROLES:
+        owned_ids = {r.id for r in (current_user.resident_links or [])}
+        if payload.resident_id not in owned_ids:
+            raise HTTPException(status_code=403, detail="Forbidden")
 
     invoice = None
     if payload.invoice_id:
@@ -579,7 +591,8 @@ def _confirm_local_transaction_from_callback(
 
 
 @router.get("/status/{order_id}")
-async def get_status(order_id: str, tran_trtype: Optional[str] = None, db: Session = Depends(get_db)):
+async def get_status(order_id: str, tran_trtype: Optional[str] = None, db: Session = Depends(get_db),
+                     current_user: User = Depends(require_any_role(*_AZ_STAFF_ROLES))):
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == order_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -681,17 +694,20 @@ async def _run_postauth_operation(payload: CompleteRequest, trtype: str, db: Ses
 
 
 @router.post("/complete")
-async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_db)):
+async def complete_payment(payload: CompleteRequest, db: Session = Depends(get_db),
+                           current_user: User = Depends(require_any_role(*_AZ_STAFF_ROLES))):
     return await _run_postauth_operation(payload, "21", db)
 
 
 @router.post("/reversal")
-async def reversal_payment(payload: CompleteRequest, trtype: str = "22", db: Session = Depends(get_db)):
+async def reversal_payment(payload: CompleteRequest, trtype: str = "22", db: Session = Depends(get_db),
+                           current_user: User = Depends(require_any_role(*_AZ_STAFF_ROLES))):
     return await _run_postauth_operation(payload, _resolve_postauth_trtype(trtype), db)
 
 
 @router.post("/reversal/by-order")
-async def reversal_payment_by_order(payload: ReversalByOrderRequest, db: Session = Depends(get_db)):
+async def reversal_payment_by_order(payload: ReversalByOrderRequest, db: Session = Depends(get_db),
+                                    current_user: User = Depends(require_any_role(*_AZ_STAFF_ROLES))):
     tx = db.query(OnlineTransaction).filter(OnlineTransaction.order_id == payload.order_id).first()
     if not tx:
         raise HTTPException(status_code=404, detail="Order not found")
@@ -715,7 +731,8 @@ async def reversal_payment_by_order(payload: ReversalByOrderRequest, db: Session
 
 
 @router.post("/operation")
-async def gateway_operation(payload: PostAuthOperationRequest, db: Session = Depends(get_db)):
+async def gateway_operation(payload: PostAuthOperationRequest, db: Session = Depends(get_db),
+                            current_user: User = Depends(require_any_role(*_AZ_STAFF_ROLES))):
     op = CompleteRequest(
         order_id=payload.order_id,
         amount=payload.amount,
