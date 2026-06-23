@@ -2,15 +2,15 @@ from fastapi import Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 from .database import get_db
 from .models import User, RoleEnum
-from .security import get_user_id_from_session
+from .security import get_session_data, session_matches_user
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
-    user_id = get_user_id_from_session(request)
-    if not user_id:
+    data = get_session_data(request)
+    if not data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
-    user = db.get(User, user_id)
-    if not user or not user.is_active:
+    user = db.get(User, data["user_id"])
+    if not user or not user.is_active or not session_matches_user(data, user):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
     return user
 

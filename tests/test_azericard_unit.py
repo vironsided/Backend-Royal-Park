@@ -85,7 +85,13 @@ import importlib
 import importlib.util
 import types
 
-# Build a minimal package shim so relative imports in azericard.py work
+# Build a minimal package shim so relative imports in azericard.py work.
+# The shim entries are RESTORED after loading (see below): leaving a MagicMock
+# in sys.modules["app.config"] silently broke other test modules that do
+# `from app.config import settings` at test time (e.g. the access vehicle-limit
+# test monkeypatched the mock instead of the real settings).
+_saved_modules = {k: sys.modules.get(k)
+                  for k in ("app", "app.config", "app.services", "app.services.azericard")}
 pkg = types.ModuleType("app")
 pkg.__path__ = []
 pkg.__package__ = "app"
@@ -111,23 +117,30 @@ az_mod.__package__ = "app.services"
 sys.modules["app.services.azericard"] = az_mod
 spec.loader.exec_module(az_mod)
 
-from app.services.azericard import (
-        build_signature_content,
-        generate_p_sign,
-        verify_callback_signature,
-        build_order_id,
-        amount_to_gateway,
-        build_timestamp,
-        build_nonce,
-        _as_pem,
-        CREATE_SIGN_FIELDS,
-        CALLBACK_SIGN_FIELDS,
-        CALLBACK_SIGN_FIELDS_ALT,
-        TERMINAL_CATEGORY_UTILITY,
-        TERMINAL_CATEGORY_ADVANCE,
-        TERMINAL_GROUP_STANDARD,
-        TERMINAL_GROUP_WALLET,
-    )
+# Restore whatever was in sys.modules before the shim, so the rest of the test
+# session keeps importing the REAL app package. az_mod itself stays bound to
+# fake_settings (its module-level `from ..config import settings` already ran).
+for _k, _v in _saved_modules.items():
+    if _v is not None:
+        sys.modules[_k] = _v
+    else:
+        sys.modules.pop(_k, None)
+
+build_signature_content = az_mod.build_signature_content
+generate_p_sign = az_mod.generate_p_sign
+verify_callback_signature = az_mod.verify_callback_signature
+build_order_id = az_mod.build_order_id
+amount_to_gateway = az_mod.amount_to_gateway
+build_timestamp = az_mod.build_timestamp
+build_nonce = az_mod.build_nonce
+_as_pem = az_mod._as_pem
+CREATE_SIGN_FIELDS = az_mod.CREATE_SIGN_FIELDS
+CALLBACK_SIGN_FIELDS = az_mod.CALLBACK_SIGN_FIELDS
+CALLBACK_SIGN_FIELDS_ALT = az_mod.CALLBACK_SIGN_FIELDS_ALT
+TERMINAL_CATEGORY_UTILITY = az_mod.TERMINAL_CATEGORY_UTILITY
+TERMINAL_CATEGORY_ADVANCE = az_mod.TERMINAL_CATEGORY_ADVANCE
+TERMINAL_GROUP_STANDARD = az_mod.TERMINAL_GROUP_STANDARD
+TERMINAL_GROUP_WALLET = az_mod.TERMINAL_GROUP_WALLET
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

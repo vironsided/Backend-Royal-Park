@@ -439,16 +439,6 @@ def get_notification(
     return notif
 
 
-@router.get("/{notification_id}/public")
-def get_notification_public(
-    notification_id: int,
-    db: Session = Depends(get_db),
-):
-    """Получить одно уведомление по ID (публичный endpoint без авторизации)."""
-    notif = _get_notification_internal(db, notification_id, mark_read=True)
-    if not notif:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    return notif
 
 
 def _norm_optional_str(v: Optional[str]) -> Optional[str]:
@@ -615,18 +605,4 @@ def delete_notification(
     return {"ok": True, "message": "Notification deleted"}
 
 
-@router.delete("/{notification_id}/public")
-def delete_notification_public(
-    notification_id: int,
-    db: Session = Depends(get_db),
-):
-    """Удалить уведомление (публичный endpoint без авторизации)."""
-    notif = db.query(Notification).filter(Notification.id == notification_id).first()
-    if not notif:
-        raise HTTPException(status_code=404, detail="Notification not found")
-    
-    db.delete(notif)
-    db.commit()
-    
-    return {"ok": True, "message": "Notification deleted"}
 

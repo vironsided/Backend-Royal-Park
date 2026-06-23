@@ -25,6 +25,14 @@ class Settings(BaseModel):
     ROOT_PASSWORD: str = os.getenv("ROOT_PASSWORD", "")
     FRONTEND_BASE_URL: str = os.getenv("FRONTEND_BASE_URL", "")
 
+    # Access system: max RESIDENT-type vehicles a single resident may self-register.
+    ACCESS_VEHICLES_PER_RESIDENT: int = int(os.getenv("ACCESS_VEHICLES_PER_RESIDENT", "5"))
+
+    # ANPR camera service authenticates with this shared key (header X-Camera-Key).
+    ACCESS_CAMERA_KEY: str = os.getenv("ACCESS_CAMERA_KEY", "rp-camera-dev-key")
+    # Same plate+direction from the camera is ignored within this many seconds (debounce).
+    ACCESS_CAMERA_DEBOUNCE_SEC: int = int(os.getenv("ACCESS_CAMERA_DEBOUNCE_SEC", "8"))
+
     # AzeriCard — general
     AZERICARD_GATEWAY_URL: str = os.getenv("AZERICARD_GATEWAY_URL", "")
     AZERICARD_API_URL: str = os.getenv("AZERICARD_API_URL", "")

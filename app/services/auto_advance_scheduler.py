@@ -25,6 +25,9 @@ from ..models import (
 )
 from ..routers.api_payment_logic import auto_apply_advance
 from ..utils import now_baku, to_baku_datetime
+import logging
+
+logger = logging.getLogger("royalpark")
 
 # audit: were hardcoded "TEMP" test values (10s poll). Now env-driven with sane
 # production defaults so the loop doesn't hammer the DB every 10 seconds.
@@ -203,7 +206,7 @@ def _run_once() -> None:
 
         db.commit()
     except Exception as exc:
-        print(f"[auto-advance] failed: {exc}")
+        logger.error(f"[auto-advance] failed: {exc}")
         db.rollback()
     finally:
         db.close()

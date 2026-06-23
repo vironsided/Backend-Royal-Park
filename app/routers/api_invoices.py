@@ -16,6 +16,9 @@ from ..models import (
 )
 from ..deps import get_current_user
 from ..utils import to_baku_datetime, create_invoice_notification, now_baku, build_invoice_number
+import logging
+
+logger = logging.getLogger("royalpark")
 
 
 router = APIRouter(prefix="/api/invoices", tags=["invoices-api"])
@@ -1247,7 +1250,7 @@ def _update_invoice_internal(db: Session, invoice_id: int, due_date: Optional[st
         try:
             inv.due_date = datetime.strptime(due_date.strip(), "%Y-%m-%d").date()
         except Exception as e:
-            print(f"Warning: Failed to parse due_date '{due_date}': {e}")
+            logger.warning(f"Warning: Failed to parse due_date '{due_date}': {e}")
             inv.due_date = None
     else:
         # Явная очистка: клиент отправил null или пустое поле — удаляем срок оплаты
@@ -1351,7 +1354,7 @@ def _reissue_invoice_internal(db: Session, invoice_id: int, due_date: Optional[s
         try:
             inv.due_date = datetime.strptime(due_date.strip(), "%Y-%m-%d").date()
         except Exception as e:
-            print(f"Warning: Failed to parse due_date '{due_date}': {e}")
+            logger.warning(f"Warning: Failed to parse due_date '{due_date}': {e}")
     
     # Канонический номер счета для финансовой уникальности
     inv.number = build_invoice_number(db, inv.resident_id, inv.period_year, inv.period_month)

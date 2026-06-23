@@ -3,6 +3,9 @@ import httpx
 from typing import Optional
 
 from ..config import settings
+import logging
+
+logger = logging.getLogger("royalpark")
 
 router = APIRouter(prefix="/api/payment", tags=["payment-api"])
 
@@ -64,7 +67,7 @@ async def bin_lookup(
         return determine_scheme_by_number(bin)
     except Exception as e:
         # Любая другая ошибка - используем fallback
-        print(f"BIN lookup error: {e}")
+        logger.error(f"BIN lookup error: {e}")
         return determine_scheme_by_number(bin)
 
 

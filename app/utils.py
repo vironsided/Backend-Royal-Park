@@ -2,6 +2,9 @@ import secrets
 import string
 from datetime import datetime, date, time, timedelta, timezone
 from typing import Any
+import logging
+
+logger = logging.getLogger("royalpark")
 
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -277,7 +280,7 @@ def create_invoice_notification(db, invoice, created_by_user_id=None):
                 )
     except Exception as e:
         db.rollback()
-        print(f"Error creating invoice notifications: {e}")
+        logger.error(f"Error creating invoice notifications: {e}")
 
 
 def create_news_notification(db, news):
@@ -290,20 +293,20 @@ def create_news_notification(db, news):
     
     # Проверяем, что новость активна
     if not news.is_active:
-        print(f"News {news.id} is not active, skipping notifications")
+        logger.info(f"News {news.id} is not active, skipping notifications")
         return
     
     # Проверяем, что published_at установлена
     now = datetime.utcnow()
     if not news.published_at:
-        print(f"News {news.id} has no published_at, skipping notifications")
+        logger.info(f"News {news.id} has no published_at, skipping notifications")
         return
     
     # Если published_at в будущем более чем на 5 минут, не создаем уведомления
     # (для запланированных новостей - уведомления создадутся позже)
     time_diff = (news.published_at - now).total_seconds()
     if time_diff > 300:  # 5 минут вместо 1 секунды
-        print(f"News {news.id} is scheduled for future (diff: {time_diff}s), skipping notifications")
+        logger.info(f"News {news.id} is scheduled for future (diff: {time_diff}s), skipping notifications")
         return
     
     target_blocks = None
@@ -336,7 +339,7 @@ def create_news_notification(db, news):
         ).all()
     
     if not users:
-        print(f"No active resident users found for news {news.id}")
+        logger.info(f"No active resident users found for news {news.id}")
         return
     
     # Парсим заголовок новости по локали пользователя
@@ -404,10 +407,10 @@ def create_news_notification(db, news):
                     body=body,
                     data={"type": "NEWS", "news_id": str(news.id), "locale": locale},
                 )
-        print(f"Created {notifications_created} notifications for news {news.id} ({len(users)} total users)")
+        logger.info(f"Created {notifications_created} notifications for news {news.id} ({len(users)} total users)")
     except Exception as e:
         db.rollback()
-        print(f"Error creating news notifications: {e}")
+        logger.error(f"Error creating news notifications: {e}")
 
 
 # audit F-14: validate uploads by real magic bytes, not the client content-type

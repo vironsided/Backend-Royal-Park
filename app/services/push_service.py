@@ -10,6 +10,9 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import PushDeviceToken
+import logging
+
+logger = logging.getLogger("royalpark")
 
 try:
     import firebase_admin
@@ -81,7 +84,7 @@ def ensure_firebase_initialized() -> bool:
         firebase_admin.initialize_app(cred, {"projectId": settings.FIREBASE_PROJECT_ID or None})
         return True
     except Exception as exc:
-        print(f"FCM init failed: {exc}")
+        logger.error(f"FCM init failed: {exc}")
         return False
 
 
@@ -247,5 +250,5 @@ def send_push_to_users(
             row.updated_at = now
         db.commit()
     except Exception as exc:
-        print(f"FCM send failed: {exc}")
+        logger.error(f"FCM send failed: {exc}")
 

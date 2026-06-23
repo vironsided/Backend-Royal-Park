@@ -24,6 +24,9 @@ from ..models import (
 )
 from ..security import get_user_id_from_session
 from ..utils import build_invoice_number, now_baku, to_baku_datetime
+import logging
+
+logger = logging.getLogger("royalpark")
 
 
 router = APIRouter(prefix="/api/resident", tags=["resident-api"])
@@ -1157,8 +1160,8 @@ def get_resident_detail(
         raise
     except Exception as e:
         import traceback
-        print(f"ERROR in get_resident_detail: {e}")
-        print(traceback.format_exc())
+        logger.error(f"ERROR in get_resident_detail: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
@@ -1901,7 +1904,7 @@ def create_resident_payment(
             else:
                 message = "Платёж успешно создан (не применён к счетам - нет подходящих счетов)"
     except Exception as e:
-        print(f"Warning: apply_payment_to_invoices failed: {e}")
+        logger.warning(f"Warning: apply_payment_to_invoices failed: {e}")
         # Payment still created, just not applied
         message = "Платёж успешно создан, но не применён к счетам"
 

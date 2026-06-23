@@ -171,25 +171,6 @@ def list_tenants_api(
     return _list_tenants_internal(db, q, block_id, unit_number, page, per_page)
 
 
-@router.get("/public")
-def list_tenants_public(
-    db: Session = Depends(get_db),
-    q: Optional[str] = Query(None),
-    block_id: Optional[int] = Query(None),
-    unit_number: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(25, ge=1, le=200),
-):
-    """Public endpoint for testing."""
-    try:
-        return _list_tenants_internal(db, q, block_id, unit_number, page, per_page)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        print(f"Error in list_tenants_public: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 def _get_tenant_internal(
@@ -239,13 +220,6 @@ def get_tenant_api(
     return _get_tenant_internal(tenant_id, db)
 
 
-@router.get("/{tenant_id}/public")
-def get_tenant_public(
-    tenant_id: int,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    return _get_tenant_internal(tenant_id, db)
 
 
 def _create_tenant_internal(
@@ -308,21 +282,6 @@ def _create_tenant_internal(
     }
 
 
-@router.post("/public", status_code=status.HTTP_201_CREATED)
-def create_tenant_public(
-    data: TenantCreate,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    try:
-        return _create_tenant_internal(data, db)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        print(f"Error in create_tenant_public: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -398,14 +357,6 @@ def update_tenant_api(
     }
 
 
-@router.put("/{tenant_id}/public")
-def update_tenant_public(
-    tenant_id: int,
-    data: TenantUpdate,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    return update_tenant_api(tenant_id, data, db, None)
 
 
 def _reset_tenant_password_internal(
@@ -441,13 +392,6 @@ def reset_tenant_password_api(
     return _reset_tenant_password_internal(tenant_id, db)
 
 
-@router.post("/{tenant_id}/reset/public")
-def reset_tenant_password_public(
-    tenant_id: int,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    return _reset_tenant_password_internal(tenant_id, db)
 
 
 def _delete_tenant_internal(
@@ -479,11 +423,4 @@ def delete_tenant_api(
     return _delete_tenant_internal(tenant_id, db)
 
 
-@router.delete("/{tenant_id}/public")
-def delete_tenant_public(
-    tenant_id: int,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    return _delete_tenant_internal(tenant_id, db)
 

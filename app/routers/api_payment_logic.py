@@ -127,10 +127,13 @@ def auto_apply_advance(
 
     from sqlalchemy import cast, String
 
+    # FOR UPDATE: the advance pool consumes leftovers of these payments —
+    # lock them so two concurrent appliers can't both spend the same leftover.
     payments: list[Payment] = (
         db.query(Payment)
         .filter(Payment.resident_id.in_(all_resident_ids), cast(Payment.method, String) != "ADVANCE")
         .order_by(Payment.received_at.asc(), Payment.id.asc())
+        .with_for_update(of=Payment)
         .all()
     )
 
@@ -244,7 +247,10 @@ def apply_payment_to_invoices(
     scope: Optional[str] = None,
 ) -> int:
     """Apply a payment to invoices based on scope ('month'|'all'|None)."""
-    payment = db.get(Payment, payment_id)
+    # FOR UPDATE: serialize concurrent applications of the SAME payment —
+    # without the lock two parallel requests both read the pre-commit
+    # applied_total and double-apply the money (audit P0-6). No-op on SQLite.
+    payment = db.query(Payment).filter(Payment.id == payment_id).with_for_update(of=Payment).first()
     if not payment:
         return 0
     if scope is None:
@@ -348,7 +354,8 @@ def apply_payment_to_invoice(
     max_amount: Optional[Decimal] = None,
 ) -> Decimal:
     """Apply a payment to a single invoice. Returns applied amount."""
-    payment = db.get(Payment, payment_id)
+    # FOR UPDATE: see apply_payment_to_invoices — prevents double-apply races.
+    payment = db.query(Payment).filter(Payment.id == payment_id).with_for_update(of=Payment).first()
     inv = db.get(Invoice, invoice_id)
     if not payment or not inv:
         return Decimal("0")
@@ -435,10 +442,13 @@ def apply_advance_to_invoice(
 
     from sqlalchemy import cast, String
 
+    # FOR UPDATE: lock the pool payments (see auto_apply_advance) — prevents
+    # double-spending the same leftover from concurrent requests.
     payments: list[Payment] = (
         db.query(Payment)
         .filter(Payment.resident_id.in_(all_resident_ids), cast(Payment.method, String) != "ADVANCE")
         .order_by(Payment.created_at.asc(), Payment.id.asc())
+        .with_for_update(of=Payment)
         .all()
     )
 
@@ -536,10 +546,13 @@ def apply_advance_with_limit(
 
     from sqlalchemy import cast, String
 
+    # FOR UPDATE: lock the pool payments (see auto_apply_advance) — prevents
+    # double-spending the same leftover from concurrent requests.
     payments: list[Payment] = (
         db.query(Payment)
         .filter(Payment.resident_id.in_(all_resident_ids), cast(Payment.method, String) != "ADVANCE")
         .order_by(Payment.created_at.asc(), Payment.id.asc())
+        .with_for_update(of=Payment)
         .all()
     )
 

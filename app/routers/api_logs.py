@@ -18,6 +18,9 @@ from ..models import (
     RoleEnum,
 )
 from ..deps import require_any_role
+import logging
+
+logger = logging.getLogger("royalpark")
 
 router = APIRouter(prefix="/api/logs", tags=["logs-api"])
 
@@ -296,7 +299,7 @@ def get_payment_logs(
             last_page=last_page
         )
     except Exception as e:
-        print(f"Error in get_payment_logs: {e}")
+        logger.error(f"Error in get_payment_logs: {e}")
         return PaymentLogListOut(
             logs=[],
             total=0,

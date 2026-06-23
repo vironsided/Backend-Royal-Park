@@ -80,11 +80,11 @@ def login(request: Request, db: Session = Depends(get_db),
         resp = redirect_frontend("/user/dashboard.html", status_code=status.HTTP_302_FOUND)
     else:
         resp = redirect_admin("/dashboard", status_code=status.HTTP_302_FOUND)
-    set_session(resp, user.id)
+    set_session(resp, user.id, user.session_version or 0)
 
     if user.require_password_change:
         resp = redirect_frontend("/qr-password-setup.html", {"from_login": "true"}, status_code=status.HTTP_302_FOUND)
-        set_session(resp, user.id)
+        set_session(resp, user.id, user.session_version or 0)
     return resp
 
 
@@ -116,12 +116,12 @@ async def api_login(login_data: LoginRequest, request: Request, db: Session = De
         username=user.username,
         message="Вход выполнен успешно",
         require_password_change=user.require_password_change,
-        session_token=make_session_token(user.id),
+        session_token=make_session_token(user.id, user.session_version or 0),
     )
     
     # Создаем Response и устанавливаем cookie
     response = JSONResponse(content=response_data.dict())
-    set_session(response, user.id)
+    set_session(response, user.id, user.session_version or 0)
     
     return response
 
@@ -170,21 +170,40 @@ async def api_force_change_password(
     user.require_password_change = False
     user.temp_password_plain = None
     user.last_password_change_at = datetime.utcnow()
+    # revoke every other session issued before the password change; re-issue a
+    # fresh cookie so THIS device stays logged in
+    user.session_version = (user.session_version or 0) + 1
     db.commit()
 
-    return JSONResponse(content={"success": True, "message": "Пароль успешно изменен"})
+    resp = JSONResponse(content={"success": True, "message": "Пароль успешно изменен"})
+    set_session(resp, user.id, user.session_version)
+    return resp
+
+
+def _revoke_sessions(request: Request, db: Session) -> None:
+    """Bump session_version so EVERY token of this user dies, not just this cookie."""
+    from ..security import get_session_data, session_matches_user
+    data = get_session_data(request)
+    if not data:
+        return
+    user = db.get(User, data["user_id"])
+    if user and session_matches_user(data, user):
+        user.session_version = (user.session_version or 0) + 1
+        db.commit()
 
 
 @router.get("/logout")
-def logout():
+def logout(request: Request, db: Session = Depends(get_db)):
+    _revoke_sessions(request, db)
     resp = redirect_frontend("/", status_code=status.HTTP_302_FOUND)
     clear_session(resp)
     return resp
 
 
 @router.post("/api/auth/logout")
-def api_logout():
-    """API endpoint for logout - clears the session cookie"""
+def api_logout(request: Request, db: Session = Depends(get_db)):
+    """API endpoint for logout — clears the cookie and revokes all the user's tokens"""
+    _revoke_sessions(request, db)
     response = JSONResponse(content={"success": True, "message": "Logged out successfully"})
     clear_session(response)
     return response

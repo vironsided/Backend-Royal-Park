@@ -100,9 +100,19 @@ def list_users_api(
         page = last_page
     
     users = query.order_by(User.id.asc()).offset((page - 1) * per_page).limit(per_page).all()
-    
+
+    # temp_password_plain is shown only for accounts the actor may manage
+    # (QR onboarding); otherwise an ADMIN could read another ADMIN's/ROOT's
+    # temp password from the list and log in as them.
+    items = []
+    for u in users:
+        out = UserOut.from_orm_with_tz(u)
+        if u.id != actor.id and not can_manage_user(u, actor):
+            out.temp_password_plain = None
+        items.append(out)
+
     return {
-        "items": [UserOut.from_orm_with_tz(u) for u in users],
+        "items": items,
         "total": total,
         "page": page,
         "per_page": per_page,
@@ -362,6 +372,8 @@ def reset_password_api(
     target.password_hash = hash_password(temp_pass)
     target.require_password_change = True
     target.temp_password_plain = temp_pass
+    # admin reset revokes all of the target's sessions
+    target.session_version = (target.session_version or 0) + 1
     db.commit()
     db.refresh(target)
     return UserOut.from_orm_with_tz(target)

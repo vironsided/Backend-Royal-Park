@@ -45,8 +45,9 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
-def make_session_token(user_id: int) -> str:
-    return serializer.dumps({"user_id": int(user_id)})
+def make_session_token(user_id: int, session_version: int = 0) -> str:
+    # "sv" lets us revoke all of a user's tokens by bumping users.session_version
+    return serializer.dumps({"user_id": int(user_id), "sv": int(session_version or 0)})
 
 
 def _read_bearer_token(request: Request) -> str | None:
@@ -60,8 +61,8 @@ def _read_bearer_token(request: Request) -> str | None:
     return token or None
 
 
-def set_session(response: Response, user_id: int):
-    token = make_session_token(user_id)
+def set_session(response: Response, user_id: int, session_version: int = 0):
+    token = make_session_token(user_id, session_version)
     cross_site = _use_cross_site_cookie()
     response.set_cookie(
         key=settings.COOKIE_NAME,
@@ -84,12 +85,25 @@ def clear_session(response: Response):
     )
 
 
-def get_user_id_from_session(request: Request) -> int | None:
+def get_session_data(request: Request) -> dict | None:
+    """Verified session payload: {"user_id": int, "sv": int} or None."""
     token = request.cookies.get(settings.COOKIE_NAME) or _read_bearer_token(request)
     if not token:
         return None
     try:
         data = serializer.loads(token, max_age=SESSION_MAX_AGE_SECONDS)
-        return int(data.get("user_id"))
+        return {"user_id": int(data.get("user_id")), "sv": int(data.get("sv", 0))}
     except Exception:
         return None
+
+
+def session_matches_user(data: dict | None, user) -> bool:
+    """The token is only valid if it carries the user's CURRENT session_version."""
+    if not data or user is None:
+        return False
+    return int(data.get("sv", 0)) == int(getattr(user, "session_version", 0) or 0)
+
+
+def get_user_id_from_session(request: Request) -> int | None:
+    data = get_session_data(request)
+    return data["user_id"] if data else None

@@ -1,11 +1,11 @@
 import os
 import logging
-from fastapi import FastAPI, Request, Depends
+import pathlib
+from fastapi import FastAPI, Request, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from fastapi.exception_handlers import http_exception_handler
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import JSONResponse
 
 logger = logging.getLogger("royalpark")
@@ -15,12 +15,55 @@ from .database import Base, engine, SessionLocal
 from .models import User, RoleEnum
 from .security import hash_password, get_user_id_from_session
 from .deps import require_any_role
-from .routers import auth_routes, dashboard, api_users, api_blocks, api_tariffs, api_residents, api_readings, api_tenants, api_invoices, api_payments, api_notifications, api_dashboard, api_logs, api_qr, api_payment, api_resident_dashboard, api_news, api_azericard, api_sales, push_routes
+from .routers import auth_routes, dashboard, api_users, api_blocks, api_tariffs, api_residents, api_readings, api_tenants, api_invoices, api_payments, api_notifications, api_dashboard, api_logs, api_qr, api_payment, api_resident_dashboard, api_news, api_azericard, api_sales, push_routes, api_access
+
+
+def _run_alembic():
+    """Schema versioning (Alembic). The legacy bootstrap (create_all + soft DDL)
+    still runs first and brings ANY existing DB to the current schema; alembic
+    is the source of truth for all FUTURE changes:
+    - a DB without alembic_version but with tables -> stamp head (schema is
+      already current thanks to the bootstrap),
+    - then upgrade head applies any new migration files.
+    New schema changes go into alembic/versions/, NOT into run_bootstrap_schema.
+    """
+    from pathlib import Path
+    from sqlalchemy import inspect as sa_inspect
+    from alembic.config import Config
+    from alembic import command
+
+    root = Path(__file__).resolve().parents[1]
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "alembic"))
+    insp = sa_inspect(engine)
+    if not insp.has_table("alembic_version") and insp.has_table("users"):
+        command.stamp(cfg, "head")
+    command.upgrade(cfg, "head")
 
 
 def init_db():
     Base.metadata.create_all(bind=engine)
     run_bootstrap_schema()
+    try:
+        _run_alembic()
+    except Exception as _e:
+        # never block boot on versioning bookkeeping; the bootstrap above
+        # already guarantees a working schema
+        logger.error(f"[alembic] upgrade failed: {_e}")
+
+    # ALTER TYPE ... ADD VALUE must run/commit OUTSIDE a transaction block before the
+    # new value can be inserted. Ensure the GUARD role value exists on the existing
+    # roleenum (no-op if already present). Postgres only; harmless if it fails.
+    try:
+        with engine.connect() as _conn:
+            _conn.execution_options(isolation_level="AUTOCOMMIT").exec_driver_sql(
+                "ALTER TYPE roleenum ADD VALUE IF NOT EXISTS 'GUARD'"
+            )
+        # Drop pooled connections so the seed below opens fresh ones that see the new
+        # enum value (avoids a first-boot race on a DB where roleenum predates GUARD).
+        engine.dispose()
+    except Exception as _e:
+        logger.warning(f"[bootstrap] roleenum GUARD ensure skipped: {_e}")
 
     db: Session = SessionLocal()
     try:
@@ -55,6 +98,23 @@ def init_db():
             )
             db.add(satish)
             db.commit()
+
+        # Seed охранника КПП (vehicle-access). Локальный известный пароль для теста.
+        guard = db.query(User).filter(User.username == "guard").first()
+        if not guard:
+            guard_pw = os.getenv("GUARD_PASSWORD", "guard123")
+            guard = User(
+                username="guard",
+                password_hash=hash_password(guard_pw),
+                role=RoleEnum.GUARD,
+                full_name="Aydın Quliyev",
+                require_password_change=False,
+                temp_password_plain=guard_pw,
+                created_by_id=root.id if root else None,
+            )
+            db.add(guard)
+            db.commit()
+            logger.info(f"[seed] guard user created (login: guard / {guard_pw})")
     finally:
         db.close()
 
@@ -95,6 +155,8 @@ def run_bootstrap_schema():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS comment   varchar(500);",
         # НОВОЕ: путь к аватару
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_path varchar(255);",
+        # session revocation: tokens carry the version they were issued with
+        "ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 0;",
         "ALTER TABLE payment_applications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();",
         # Tariffs: фиксированная часть для ELECTRIC/GAS
         "ALTER TABLE tariffs ADD COLUMN IF NOT EXISTS stable_tariff NUMERIC(18,2) NOT NULL DEFAULT 0;",
@@ -140,8 +202,7 @@ def run_bootstrap_schema():
           resident_id INTEGER NOT NULL REFERENCES residents(id) ON DELETE CASCADE,
           PRIMARY KEY (user_id, resident_id)
         );
-        """
-        # ... (твои предыдущие DDL тут могут быть)
+        """,
         """
            CREATE TABLE IF NOT EXISTS resident_services (
              id SERIAL PRIMARY KEY,
@@ -153,7 +214,7 @@ def run_bootstrap_schema():
              created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
              created_by_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL
            );
-           """
+           """,
         "ALTER TABLE invoice_lines ALTER COLUMN meter_reading_id DROP NOT NULL;",
         "ALTER TABLE tariff_steps ADD COLUMN IF NOT EXISTS from_date DATE;",
         "ALTER TABLE tariff_steps ADD COLUMN IF NOT EXISTS to_date DATE;",
@@ -397,12 +458,34 @@ def run_bootstrap_schema():
     # Гарантируем папку для аватаров
     os.makedirs("uploads/avatars", exist_ok=True)
     os.makedirs("uploads/meter_readings", exist_ok=True)
+    os.makedirs("uploads/gate", exist_ok=True)
 
+
+
+def _is_prod_like() -> bool:
+    # Same heuristic as security._use_cross_site_cookie: an https non-localhost
+    # FRONTEND_BASE_URL means this instance serves a real deployment.
+    frontend = (settings.FRONTEND_BASE_URL or "").strip().lower()
+    if not frontend.startswith("https://"):
+        return False
+    return "localhost" not in frontend and "127.0.0.1" not in frontend
+
+
+def _assert_camera_key_safe():
+    # The ANPR camera key authorizes barrier opening (/api/access/camera/detect).
+    # An unset or default key in production would let anyone open the gate.
+    if _is_prod_like() and settings.ACCESS_CAMERA_KEY in ("", "rp-camera-dev-key"):
+        raise RuntimeError(
+            "ACCESS_CAMERA_KEY must be set to a strong unique secret in production "
+            "(refusing to start with the dev default)"
+        )
 
 
 def create_app() -> FastAPI:
+    _assert_camera_key_safe()
     app = FastAPI(title="FastAPI Admin (Dark)")
-    app.add_middleware(SessionMiddleware, secret_key=settings.SESSION_SECRET_KEY, session_cookie=settings.COOKIE_NAME)
+    # SessionMiddleware removed: nothing reads request.session — auth uses the
+    # signed cookie set manually in security.set_session.
 
     allow_origins = [
         "http://localhost:3000",
@@ -472,7 +555,32 @@ def create_app() -> FastAPI:
         logger.exception("Unhandled error on %s %s", request.method, request.url.path)
         return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    # /uploads was a public StaticFiles mount. The genuinely sensitive new data is
+    # gate/* — КПП snapshots (photos of people and cars / licence plates) — so those
+    # now require a guard/staff session. avatars/ and meter_readings/ stay publicly
+    # readable as before: clients (incl. the Flutter app via bare NetworkImage URLs)
+    # load them without a session, and full gating broke mobile avatars.
+    uploads_root = pathlib.Path("uploads").resolve()
+    gate_view_roles = {RoleEnum.GUARD, RoleEnum.ADMIN, RoleEnum.ROOT, RoleEnum.OPERATOR}
+
+    @app.get("/uploads/{file_path:path}")
+    def serve_upload(file_path: str, request: Request):
+        target = (uploads_root / file_path).resolve()
+        if not target.is_relative_to(uploads_root) or not target.is_file():
+            raise HTTPException(status_code=404, detail="Not found")
+        # Only КПП gate snapshots are access-controlled.
+        if target.relative_to(uploads_root).parts[0] == "gate":
+            uid = get_user_id_from_session(request)
+            if uid is None:
+                raise HTTPException(status_code=401, detail="Authentication required")
+            db = SessionLocal()
+            try:
+                u = db.get(User, uid)
+                if not (u and u.is_active and u.role in gate_view_roles):
+                    raise HTTPException(status_code=403, detail="Forbidden")
+            finally:
+                db.close()
+        return FileResponse(target)
 
     # Staff-only routers (audit F-08): these manage all residents/billing data and
     # are NEVER called by the resident panel (resident data flows through
@@ -501,6 +609,7 @@ def create_app() -> FastAPI:
     app.include_router(api_azericard.router)
     app.include_router(api_sales.router)
     app.include_router(push_routes.router)
+    app.include_router(api_access.router)
     @app.get("/healthz")
     def healthz():
         return {"ok": True}

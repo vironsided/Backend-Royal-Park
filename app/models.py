@@ -37,6 +37,7 @@ class RoleEnum(str, enum.Enum):
     OPERATOR = "OPERATOR"
     RESIDENT = "RESIDENT"
     SALES = "SALES"  # менеджер по продаже вилл/домов (как Satish)
+    GUARD = "GUARD"  # охранник КПП
 
 #Енумы типов счётчиков
 class MeterType(str, enum.Enum):
@@ -200,6 +201,9 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(64), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Bumped on logout / password change / admin reset — session tokens carry
+    # the version they were issued with, so old tokens die instantly.
+    session_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     role: Mapped[RoleEnum] = mapped_column(Enum(RoleEnum), nullable=False, default=RoleEnum.RESIDENT)
 
@@ -775,3 +779,116 @@ class SalesContractInstallment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=datetime.utcnow)
 
     contract: Mapped["SalesContract"] = relationship("SalesContract", back_populates="installments")
+
+
+# ───────────────────────── Vehicle Access (КПП) ─────────────────────────
+
+class VehicleType(str, enum.Enum):
+    RESIDENT = "RESIDENT"   # авто жителя (бессрочно)
+    GUEST = "GUEST"         # гостевой пропуск (с окном времени)
+
+class VehicleStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    BLACKLIST = "BLACKLIST"
+    EXPIRED = "EXPIRED"
+
+class AccessDirection(str, enum.Enum):
+    IN = "IN"
+    OUT = "OUT"
+
+class RequestStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    HANDLED = "HANDLED"
+    REJECTED = "REJECTED"
+
+class EventDecision(str, enum.Enum):
+    AUTO_OPEN = "AUTO_OPEN"          # camera-triggered (Phase 2)
+    MANUAL_OPEN = "MANUAL_OPEN"      # guard-triggered
+    DENIED = "DENIED"
+    BLACKLIST_ALERT = "BLACKLIST_ALERT"
+
+class EventSource(str, enum.Enum):
+    MANUAL = "MANUAL"
+    REQUEST = "REQUEST"
+    CAMERA = "CAMERA"                # Phase 2
+
+
+class AccessVehicle(Base):
+    __tablename__ = "access_vehicles"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plate: Mapped[str] = mapped_column(String(16), nullable=False, index=True)  # normalized
+    type: Mapped[VehicleType] = mapped_column(SAEnum(VehicleType, name="vehicle_type"), nullable=False)
+    status: Mapped[VehicleStatus] = mapped_column(SAEnum(VehicleStatus, name="vehicle_status"), nullable=False, default=VehicleStatus.ACTIVE)
+    resident_id: Mapped[int | None] = mapped_column(ForeignKey("residents.id", ondelete="SET NULL"), nullable=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    valid_from: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    valid_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, default=datetime.utcnow)
+
+    resident: Mapped["Resident"] = relationship("Resident", lazy="joined")
+
+
+class AccessRequest(Base):
+    __tablename__ = "access_requests"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    requester_user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    resident_id: Mapped[int | None] = mapped_column(ForeignKey("residents.id", ondelete="SET NULL"), nullable=True)
+    plate: Mapped[str] = mapped_column(String(16), nullable=False)
+    direction: Mapped[AccessDirection] = mapped_column(SAEnum(AccessDirection, name="access_direction_req"), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[RequestStatus] = mapped_column(SAEnum(RequestStatus, name="request_status"), nullable=False, default=RequestStatus.PENDING)
+    handled_by_guard_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, default=datetime.utcnow)
+
+    requester: Mapped["User"] = relationship("User", foreign_keys=[requester_user_id], lazy="joined")
+    resident: Mapped["Resident"] = relationship("Resident", lazy="joined")
+
+
+class AccessEvent(Base):
+    __tablename__ = "access_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plate: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    direction: Mapped[AccessDirection] = mapped_column(SAEnum(AccessDirection, name="access_direction_evt"), nullable=False)
+    decision: Mapped[EventDecision] = mapped_column(SAEnum(EventDecision, name="event_decision"), nullable=False)
+    source: Mapped[EventSource] = mapped_column(SAEnum(EventSource, name="event_source"), nullable=False, default=EventSource.MANUAL)
+    matched_vehicle_id: Mapped[int | None] = mapped_column(ForeignKey("access_vehicles.id", ondelete="SET NULL"), nullable=True)
+    resident_id: Mapped[int | None] = mapped_column(ForeignKey("residents.id", ondelete="SET NULL"), nullable=True)
+    guard_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    visitor_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    visitor_doc_id: Mapped[str | None] = mapped_column(String(40), nullable=True)  # driver ID/document (AA1680406)
+    purpose: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    snapshot_url: Mapped[str | None] = mapped_column(String(255), nullable=True)  # Phase 2
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, default=datetime.utcnow)
+    exit_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)  # set on exit (camera/manual)
+
+    resident: Mapped["Resident"] = relationship("Resident", lazy="joined")
+
+
+# ───────────────────────── ANPR camera gate events (Phase 2) ─────────────────────────
+
+class GateHint(str, enum.Enum):
+    UNKNOWN = "UNKNOWN"
+    BLACKLIST = "BLACKLIST"
+    NO_PLATE = "NO_PLATE"
+
+class GateStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    HANDLED = "HANDLED"
+    DISMISSED = "DISMISSED"
+
+
+class AccessGateEvent(Base):
+    __tablename__ = "access_gate_events"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plate: Mapped[str | None] = mapped_column(String(16), nullable=True)  # NULL for no-plate
+    vehicle_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # car/motorcycle/...
+    hint: Mapped[GateHint] = mapped_column(SAEnum(GateHint, name="gate_hint"), nullable=False)
+    direction: Mapped[AccessDirection] = mapped_column(SAEnum(AccessDirection, name="access_direction_gate"), nullable=False)
+    snapshot_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[GateStatus] = mapped_column(SAEnum(GateStatus, name="gate_status"), nullable=False, default=GateStatus.PENDING)
+    camera_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    handled_by_guard_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, default=datetime.utcnow)

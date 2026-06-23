@@ -25,6 +25,17 @@ from .api_payment_logic import auto_apply_advance
 
 router = APIRouter(prefix="/api/readings", tags=["readings-api"])
 
+
+def validate_reading_date(reading_date: datetime) -> datetime:
+    """A typo'd reading date silently creates an invoice for a garbage period
+    (e.g. year 0202). Real periods start no earlier than 2020; allow up to ~2
+    months ahead for early entry. (Opening-debt invoices use year 1900 but are
+    created by a different path, not through readings.)"""
+    if reading_date.year < 2020 or reading_date > datetime.utcnow() + timedelta(days=62):
+        raise HTTPException(status_code=400, detail="Reading date out of allowed range")
+    return reading_date
+
+
 def money(x: Decimal) -> Decimal:
     """Округление денег до 2 знаков."""
     return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -1256,40 +1267,6 @@ def get_resident_meters(
     return {"meters": meters}
 
 
-# ====== Public endpoints (must be before dynamic routes) ======
-@router.post("/public")
-def create_readings_public(
-    data: ReadingCreate,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    try:
-        # Получаем пользователя из сессии
-        from ..models import User
-        from ..security import get_user_id_from_session
-        
-        user_id = get_user_id_from_session(request)
-        user = None
-        if user_id:
-            user = db.get(User, user_id)
-            if user and user.is_active:
-                pass  # Используем пользователя из сессии
-            else:
-                user = None
-        
-        # Fallback: если нет сессии, используем первого пользователя для теста
-        if not user:
-            user = db.query(User).first()
-            if not user:
-                raise HTTPException(status_code=500, detail="No user found in database")
-        
-        return create_readings_internal(data, user, db)
-    except Exception as e:
-        import traceback
-        print(f"Error in create_readings_public: {e}")
-        print(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 # ====== Create/Update readings ======
@@ -1325,6 +1302,7 @@ def upload_meter_photo(
         reading_date = datetime.strptime(date_str, "%Y-%m-%d")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid date format")
+    validate_reading_date(reading_date)
 
     period_start = datetime(reading_date.year, reading_date.month, 1)
     period_end = datetime(
@@ -1414,6 +1392,7 @@ def delete_meter_photo(
         reading_date = datetime.strptime(date_str, "%Y-%m-%d")
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid date format")
+    validate_reading_date(reading_date)
 
     period_start = datetime(reading_date.year, reading_date.month, 1)
     period_end = datetime(
@@ -1462,6 +1441,7 @@ def create_readings_internal(
         reading_date = datetime.strptime(data.date_str, "%Y-%m-%d") if data.date_str else datetime.utcnow()
     except Exception:
         reading_date = datetime.utcnow()
+    validate_reading_date(reading_date)
 
     period_year = reading_date.year
     period_month = reading_date.month
@@ -1760,31 +1740,8 @@ def create_readings_internal(
     return {"success": True, "upserted_count": len(upserted)}
 
 
-# ====== Public endpoints (temporary for testing) ======
-@router.get("/public")
-def list_readings_public(
-    db: Session = Depends(get_db),
-    block_id: Optional[int] = Query(None),
-    resident_id: Optional[int] = Query(None),
-    meter_type: Optional[List[str]] = Query(None),
-    year: Optional[int] = Query(None),
-    month: Optional[int] = Query(None),
-    q: Optional[str] = Query(None),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(25, ge=1, le=100),
-):
-    """Public endpoint for testing."""
-    return list_readings(db, block_id, resident_id, meter_type, year, month, q, page, per_page)
 
 
-@router.get("/resident/{resident_id}/meters/public")
-def get_resident_meters_public(
-    resident_id: int,
-    db: Session = Depends(get_db),
-    date: Optional[str] = Query(default=None),
-):
-    """Public endpoint for testing."""
-    return get_resident_meters(resident_id, db, date)
 
 
 
@@ -1984,104 +1941,8 @@ def get_reading_history(
     return {"meters": result}
 
 
-@router.get("/resident/{resident_id}/history/public")
-def get_reading_history_public(
-    resident_id: int,
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    return get_reading_history(resident_id, db)
 
 
-# ====== Delete last reading (public endpoint must be before main) ======
-@router.delete("/meter/{meter_id}/last/public")
-def delete_last_reading_public(
-    meter_id: int,
-    request: Request,
-    expected_reading_id: int | None = Query(None),
-    db: Session = Depends(get_db),
-):
-    """Public endpoint for testing."""
-    from ..models import User, ReadingLog, InvoiceLine, Invoice
-    from ..security import get_user_id_from_session
-    from sqlalchemy import func
-    
-    # Получаем пользователя из сессии
-    user_id = get_user_id_from_session(request)
-    user = None
-    if user_id:
-        user = db.get(User, user_id)
-        if user and user.is_active:
-            pass  # Используем пользователя из сессии
-        else:
-            user = None
-    
-    # Fallback: если нет сессии, используем первого пользователя для теста
-    if not user:
-        user = db.query(User).first()
-        if not user:
-            raise HTTPException(status_code=500, detail="No user found in database")
-    
-    m = db.get(ResidentMeter, meter_id)
-    if not m:
-        raise HTTPException(status_code=404, detail="Meter not found")
-
-    last = (
-        db.query(MeterReading)
-        .filter(MeterReading.resident_meter_id == m.id)
-        .order_by(MeterReading.reading_date.desc(), MeterReading.id.desc())
-        .first()
-    )
-    if not last:
-        return {"ok": True, "message": "Nothing to delete"}
-    if _is_period_paid(db, m.resident_id, last.reading_date.year, last.reading_date.month):
-        raise HTTPException(status_code=409, detail="Editing is disabled for paid periods")
-    lock_map = _meter_reading_payment_lock_map(db, m.resident_id, last.reading_date.year, last.reading_date.month)
-    if lock_map.get(int(last.id), {}).get("locked"):
-        raise HTTPException(status_code=409, detail="This line is paid and cannot be edited")
-    if expected_reading_id is not None and last.id != expected_reading_id:
-        raise HTTPException(
-            status_code=409,
-            detail="Only the originally selected latest reading can be deleted once",
-        )
-
-    db.query(InvoiceLine).filter(InvoiceLine.meter_reading_id == last.id).delete()
-
-    db.add(ReadingLog(
-        action="DELETE",
-        reading_id=last.id,
-        resident_meter_id=m.id,
-        user_id=user.id,
-        details="deleted"
-    ))
-    delete_meter_photo_for_reading(db, last.id)
-    db.delete(last)
-
-    inv = db.query(Invoice).filter(
-        Invoice.resident_id == m.resident_id,
-        Invoice.period_year == last.reading_date.year,
-        Invoice.period_month == last.reading_date.month,
-    ).first()
-    
-    if inv:
-        db.flush()
-        sums = db.query(
-            func.coalesce(func.sum(InvoiceLine.amount_net), 0),
-            func.coalesce(func.sum(InvoiceLine.amount_vat), 0),
-            func.coalesce(func.sum(InvoiceLine.amount_total), 0),
-        ).filter(InvoiceLine.invoice_id == inv.id).one()
-
-        inv.total_amount_net = Decimal(sums[0])
-        inv.total_amount_vat = Decimal(sums[1])
-        inv.total_amount_total = Decimal(sums[2])
-        
-        if inv.total_amount_total == 0:
-            line_count = db.query(func.count(InvoiceLine.id)).filter(InvoiceLine.invoice_id == inv.id).scalar()
-            if line_count == 0:
-                db.delete(inv)
-
-    db.commit()
-    return {"ok": True, "message": "Last reading deleted successfully"}
 
 
 @router.delete("/meter/{meter_id}/last")

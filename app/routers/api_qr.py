@@ -94,39 +94,6 @@ def generate_qr_token(
     )
 
 
-# ВРЕМЕННО: публичный endpoint без авторизации
-@router.post("/users/{user_id}/qr-token/public", response_model=QRTokenGenerateResponse)
-def generate_qr_token_public(
-    user_id: int,
-    db: Session = Depends(get_db),
-):
-    """ВРЕМЕННЫЙ endpoint без авторизации для генерации QR-токена"""
-    user = db.get(User, user_id)
-    if not user:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
-    
-    if not user.require_password_change or not user.temp_password_plain:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="У пользователя должен быть временный пароль для генерации QR-кода"
-        )
-    
-    token = generate_secure_token()
-    
-    qr_token = QRToken(
-        user_id=user.id,
-        token=token,
-        is_used=False
-    )
-    db.add(qr_token)
-    db.commit()
-    db.refresh(qr_token)
-    
-    return QRTokenGenerateResponse(
-        token=token,
-        user_id=user.id,
-        username=user.username
-    )
 
 
 @router.get("/verify/{token}", response_model=QRTokenVerifyResponse)
