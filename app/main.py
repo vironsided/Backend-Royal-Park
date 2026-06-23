@@ -539,6 +539,37 @@ def create_app() -> FastAPI:
                     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
         return await call_next(request)
 
+    # --- Security gate: a temp-password account must SET a real password first ---
+    # On first login (require_password_change=True) a session is issued, but the
+    # account must not reach any panel/data until it sets a permanent password and
+    # fills its profile. This middleware blocks every /api/* request from such a
+    # session EXCEPT the endpoints needed to set the password (login/check/logout/
+    # force-change-password and the QR setup endpoints). Applies to ALL roles.
+    PWD_PENDING_ALLOW = (
+        "/api/auth/login",
+        "/api/auth/check",
+        "/api/auth/logout",
+        "/api/auth/force-change-password",
+        "/api/qr/verify",
+        "/api/qr/change-password",
+    )
+
+    @app.middleware("http")
+    async def block_until_password_set(request: Request, call_next):
+        if request.method != "OPTIONS":
+            path = request.url.path
+            if path.startswith("/api/") and not any(path.startswith(p) for p in PWD_PENDING_ALLOW):
+                uid = get_user_id_from_session(request)
+                if uid is not None:
+                    db = SessionLocal()
+                    try:
+                        u = db.get(User, uid)
+                        if u and u.is_active and getattr(u, "require_password_change", False):
+                            return JSONResponse(status_code=403, content={"detail": "password_change_required"})
+                    finally:
+                        db.close()
+        return await call_next(request)
+
     # audit F-15: never leak internal error text / tracebacks to clients. Any 5xx
     # (incl. explicit HTTPException(500, detail=str(e)) scattered in routers) is
     # logged server-side and returned to the client as a generic message. 4xx keep
