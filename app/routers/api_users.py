@@ -99,7 +99,8 @@ def list_users_api(
     if page > last_page:
         page = last_page
     
-    users = query.order_by(User.id.asc()).offset((page - 1) * per_page).limit(per_page).all()
+    # Новые пользователи — сверху: сортируем по id по убыванию (последний созданный первым).
+    users = query.order_by(User.id.desc()).offset((page - 1) * per_page).limit(per_page).all()
 
     # temp_password_plain is shown only for accounts the actor may manage
     # (QR onboarding); otherwise an ADMIN could read another ADMIN's/ROOT's
