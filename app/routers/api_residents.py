@@ -12,13 +12,22 @@ from ..database import get_db
 from ..models import (
     User, RoleEnum, Block, Resident, ResidentMeter,
     ResidentType, ResidentStatus, CustomerType, MeterType, Tariff, MeterReading,
-    Invoice, InvoiceLine, InvoiceStatus, PaymentApplication
+    Invoice, InvoiceLine, InvoiceStatus, Payment, PaymentApplication,
+    PaymentApplicationLine
 )
-from ..deps import get_current_user
+from ..deps import get_current_user, require_any_role
 
 
 router = APIRouter(prefix="/api/residents", tags=["residents-api"])
 DISABLED_MANUAL_METER_TYPES = {MeterType.SEWERAGE.value}
+
+# audit res-2: роутер целиком открыт ROOT/ADMIN/OPERATOR (см. main.py), но запись
+# резидента — это в том числе начальный долг (debt_utility/debt_service/debt_rent),
+# то есть деньги. В админке у OPERATOR кнопки «создать», «редактировать» и
+# «удалить» скрыты (admin/index.html, блок OPERATOR), т.е. через штатный интерфейс
+# он этого не делает — сужаем до ROOT/ADMIN. GET-эндпоинты не трогаем: список и
+# карточка резидента нужны оператору в показаниях/платежах.
+manage_only = [Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN))]
 
 
 # Pydantic models
@@ -183,25 +192,92 @@ def _next_opening_invoice_period(db: Session, resident_id: int) -> tuple[int, in
             m = 1
 
 
+def _opening_line_category(description: object) -> str | None:
+    """Категория строки opening-инвойса по маркеру в описании ("(Utility)" и т.п.).
+
+    None — строка без маркера (наследие ранних версий, когда начальный долг
+    писался одной строкой); читатели трактуют её как utility.
+    """
+    desc = str(description or "").lower()
+    for category in ("utility", "service", "rent"):
+        if f"({category})" in desc:
+            return category
+    return None
+
+
+def _invoice_line_has_payment_lines(db: Session, invoice_line_id: int) -> bool:
+    """Есть ли по строке счёта разнесение платежа (payment_application_lines)."""
+    return db.execute(
+        select(PaymentApplicationLine.id)
+        .where(PaymentApplicationLine.invoice_line_id == invoice_line_id)
+        .limit(1)
+    ).scalar_one_or_none() is not None
+
+
 def _write_opening_invoice_lines(db: Session, invoice_id: int, breakdown: dict[str, Decimal]) -> None:
+    """Пересохранение строк opening-инвойса БЕЗ разрушения разнесения платежей.
+
+    Раньше строки удалялись целиком и создавались заново. FK
+    payment_application_lines.invoice_line_id стоит на ON DELETE CASCADE, поэтому
+    такое пересоздание молча стирало детализацию «какой платёж на какую строку
+    разнесён»: PaymentApplication.amount_applied оставался (деньги суммарно «есть»),
+    а разбивка терялась безвозвратно.
+
+    Теперь строки не пересоздаются: существующие ОБНОВЛЯЮТСЯ по категориям,
+    недостающие добавляются, лишние удаляются только если по ним нет ни одного
+    разнесения. Если лишняя строка уже участвует в разнесении платежа — отдаём 409:
+    молча ломать историю оплат нельзя, бухгалтерия должна поправить сам платёж.
+    """
     existing = db.execute(
         select(InvoiceLine).where(InvoiceLine.invoice_id == invoice_id)
     ).scalars().all()
-    for line in existing:
-        db.delete(line)
 
+    # Раскладываем существующие строки по категориям. Строки без маркера считаем
+    # utility — ровно так же, как их читает _get_opening_debt_breakdown.
+    by_category: dict[str, list[InvoiceLine]] = {"utility": [], "service": [], "rent": []}
+    for line in existing:
+        by_category[_opening_line_category(line.description) or "utility"].append(line)
+
+    obsolete: list[InvoiceLine] = []
     for category in ("utility", "service", "rent"):
         amount = breakdown[category]
+        lines = by_category[category]
         if amount <= 0:
+            # Категория обнулена — все её строки лишние.
+            obsolete.extend(lines)
             continue
-        db.add(InvoiceLine(
-            invoice_id=invoice_id,
-            meter_reading_id=None,
-            description=OPENING_DEBT_DESCRIPTIONS[category],
-            amount_net=amount,
-            amount_vat=Decimal("0"),
-            amount_total=amount,
-        ))
+
+        if lines:
+            # Первую строку категории обновляем на месте (id сохраняется, значит
+            # payment_application_lines по ней остаются валидными), дубликаты —
+            # в лишние.
+            head = lines[0]
+            head.description = OPENING_DEBT_DESCRIPTIONS[category]
+            head.meter_reading_id = None
+            head.amount_net = amount
+            head.amount_vat = Decimal("0")
+            head.amount_total = amount
+            obsolete.extend(lines[1:])
+        else:
+            db.add(InvoiceLine(
+                invoice_id=invoice_id,
+                meter_reading_id=None,
+                description=OPENING_DEBT_DESCRIPTIONS[category],
+                amount_net=amount,
+                amount_vat=Decimal("0"),
+                amount_total=amount,
+            ))
+
+    for line in obsolete:
+        if _invoice_line_has_payment_lines(db, line.id):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Opening debt line already has a payment applied to it "
+                    "and cannot be removed. Correct the payment first."
+                ),
+            )
+        db.delete(line)
 
 
 def _upsert_opening_invoice(
@@ -279,13 +355,9 @@ def _get_opening_debt_breakdown(db: Session, resident_id: int) -> dict[str, Deci
     unclassified = Decimal("0")
     for ln in lines:
         amount = Decimal(str(ln.amount_total or 0))
-        desc = str(ln.description or "").lower()
-        if "(utility)" in desc:
-            breakdown["utility"] += amount
-        elif "(service)" in desc:
-            breakdown["service"] += amount
-        elif "(rent)" in desc:
-            breakdown["rent"] += amount
+        category = _opening_line_category(ln.description)
+        if category:
+            breakdown[category] += amount
         else:
             unclassified += amount
 
@@ -387,6 +459,32 @@ def _parse_meters(meters_data: List[MeterIn]) -> List[dict]:
             "tariff_id": m.tariff_id,
         })
     return result
+
+
+def _meter_has_history(db: Session, meter_id: int) -> bool:
+    """Есть ли по счётчику история, которую нельзя терять.
+
+    Показания (meter_readings) висят на счётчике с ON DELETE CASCADE, а строки
+    счетов (invoice_lines.meter_reading_id) — на показании, тоже CASCADE. То есть
+    физическое удаление счётчика с историей молча уносит и показания, и строки
+    уже выставленных счетов. Такой счётчик можно только деактивировать.
+    """
+    has_reading = db.execute(
+        select(MeterReading.id)
+        .where(MeterReading.resident_meter_id == meter_id)
+        .limit(1)
+    ).scalar_one_or_none()
+    if has_reading is not None:
+        return True
+
+    # Страховка: строка счёта, ссылающаяся на показание этого счётчика.
+    has_invoice_line = db.execute(
+        select(InvoiceLine.id)
+        .join(MeterReading, InvoiceLine.meter_reading_id == MeterReading.id)
+        .where(MeterReading.resident_meter_id == meter_id)
+        .limit(1)
+    ).scalar_one_or_none()
+    return has_invoice_line is not None
 
 
 def _list_residents_internal(
@@ -561,7 +659,7 @@ def list_residents_api(
 
 
 
-@router.post("/", response_model=ResidentOut, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=ResidentOut, status_code=status.HTTP_201_CREATED, dependencies=manage_only)
 def create_resident_api(
     payload: ResidentCreate,
     db: Session = Depends(get_db),
@@ -764,7 +862,7 @@ def get_resident_api(
 
 
 
-@router.put("/{resident_id}", response_model=ResidentOut)
+@router.put("/{resident_id}", response_model=ResidentOut, dependencies=manage_only)
 def update_resident_api(
     resident_id: int,
     payload: ResidentUpdate,
@@ -943,10 +1041,18 @@ def update_resident_api(
                 ))
 
         # 2) Deactivate (or delete) meters that are missing in incoming payload
+        #
+        # Физическое удаление счётчика допустимо ТОЛЬКО когда по нему нет вообще
+        # никакой истории: FK meter_readings.resident_meter_id и
+        # invoice_lines.meter_reading_id стоят на ON DELETE CASCADE, поэтому
+        # db.delete(meter) с историей молча выпотрошил бы строки уже выставленных
+        # (и, возможно, оплаченных) счетов. meters_with_readings посчитан выше
+        # одним запросом; здесь дополнительно перепроверяем историю прямым
+        # запросом — дешёвая страховка от расхождения выборок.
         for em in existing_meters:
             if em.id in seen_existing_ids:
                 continue
-            if em.id in meters_with_readings:
+            if em.id in meters_with_readings or _meter_has_history(db, em.id):
                 em.is_active = False
             else:
                 db.delete(em)
@@ -1001,7 +1107,30 @@ def update_resident_api(
 
 
 
-@router.delete("/{resident_id}", status_code=status.HTTP_204_NO_CONTENT)
+def _resident_billing_refs(db: Session, resident_id: int) -> dict[str, int]:
+    """Считает связанные биллинговые записи резидента.
+
+    Нужно для запрета жёсткого удаления: FK invoices.resident_id,
+    resident_meters.resident_id и meter_readings.resident_meter_id стоят на
+    ON DELETE CASCADE, поэтому один db.delete(resident) безвозвратно уносит счета,
+    строки счетов, счётчики и все показания. А payments.resident_id стоит на
+    RESTRICT — то есть у резидента с платежами то же действие падало невнятным 500.
+    """
+    invoices = db.execute(
+        select(func.count(Invoice.id)).where(Invoice.resident_id == resident_id)
+    ).scalar() or 0
+    payments = db.execute(
+        select(func.count(Payment.id)).where(Payment.resident_id == resident_id)
+    ).scalar() or 0
+    readings = db.execute(
+        select(func.count(MeterReading.id))
+        .join(ResidentMeter, MeterReading.resident_meter_id == ResidentMeter.id)
+        .where(ResidentMeter.resident_id == resident_id)
+    ).scalar() or 0
+    return {"invoices": invoices, "payments": payments, "readings": readings}
+
+
+@router.delete("/{resident_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=manage_only)
 def delete_resident_api(
     resident_id: int,
     db: Session = Depends(get_db),
@@ -1009,11 +1138,30 @@ def delete_resident_api(
 ):
     """
     Удаление резидента.
+
+    Жёсткое удаление разрешено ТОЛЬКО для резидента без единой связанной
+    биллинговой записи (ошибочно заведённая карточка). Если по резиденту уже есть
+    счета, платежи или показания — удаление запрещаем (409): каскады FK стёрли бы
+    всю финансовую историю без возможности отката. Штатный способ «убрать»
+    такого резидента — перевести его в статус INACTIVE (мягкое удаление),
+    он уже поддержан и в модели, и в форме редактирования админки.
     """
     resident = db.get(Resident, resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
-    
+
+    refs = _resident_billing_refs(db, resident.id)
+    if any(refs.values()):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot delete resident with billing history "
+                f"(invoices: {refs['invoices']}, payments: {refs['payments']}, "
+                f"meter readings: {refs['readings']}). "
+                "Set resident status to INACTIVE instead."
+            ),
+        )
+
     db.delete(resident)
     db.commit()
     return None

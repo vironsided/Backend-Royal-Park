@@ -6,12 +6,19 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_
 
 from ..database import get_db
-from ..deps import get_current_user
+from ..deps import get_current_user, require_any_role
 from ..models import User, RoleEnum, Block, Resident
 from ..security import hash_password
 from ..utils import generate_temp_password, to_baku_datetime
 
 router = APIRouter(prefix="/api/tenants", tags=["tenants-api"])
+
+# audit res-2: раздел «Жильцы» в меню у OPERATOR скрыт и роут /tenants ему закрыт
+# (admin/index.html + spa-router.js), но GET /api/tenants ему нужен — страница
+# показаний (readings.html) подтягивает отсюда ФИО/телефоны. Поэтому чтение
+# оставляем всем биллинг-ролям, а управление аккаунтами жильцов (создание,
+# правка, сброс пароля, удаление) сужаем до ROOT/ADMIN.
+manage_only = [Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN))]
 
 
 # Pydantic models
@@ -284,7 +291,7 @@ def _create_tenant_internal(
 
 
 
-@router.post("", status_code=status.HTTP_201_CREATED)
+@router.post("", status_code=status.HTTP_201_CREATED, dependencies=manage_only)
 def create_tenant_api(
     data: TenantCreate,
     db: Session = Depends(get_db),
@@ -296,7 +303,7 @@ def create_tenant_api(
     return _create_tenant_internal(data, db)
 
 
-@router.put("/{tenant_id}")
+@router.put("/{tenant_id}", dependencies=manage_only)
 def update_tenant_api(
     tenant_id: int,
     data: TenantUpdate,
@@ -380,7 +387,7 @@ def _reset_tenant_password_internal(
     return {"success": True, "message": "Password reset successfully"}
 
 
-@router.post("/{tenant_id}/reset")
+@router.post("/{tenant_id}/reset", dependencies=manage_only)
 def reset_tenant_password_api(
     tenant_id: int,
     db: Session = Depends(get_db),
@@ -411,7 +418,7 @@ def _delete_tenant_internal(
     return {"success": True, "message": "Tenant deleted successfully"}
 
 
-@router.delete("/{tenant_id}")
+@router.delete("/{tenant_id}", dependencies=manage_only)
 def delete_tenant_api(
     tenant_id: int,
     db: Session = Depends(get_db),

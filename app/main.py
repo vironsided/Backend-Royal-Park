@@ -616,20 +616,33 @@ def create_app() -> FastAPI:
     # Staff-only routers (audit F-08): these manage all residents/billing data and
     # are NEVER called by the resident panel (resident data flows through
     # api_resident_dashboard). Gate the whole router so a logged-in RESIDENT can't
-    # enumerate/mutate other people's data. Any non-resident staff role is allowed.
-    staff_only = [Depends(require_any_role(
-        RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR, RoleEnum.SALES))]
+    # enumerate/mutate other people's data.
+    #
+    # audit res-2 (2026-08-28): раньше здесь стоял один общий список из четырёх
+    # staff-ролей, из-за чего OPERATOR и SALES на бэкенде были равны ROOT —
+    # разделение ролей существовало только в CSS/роутере админки. Теперь:
+    #   * SALES отрезан от биллинга целиком. Раздел «Продажи» — это SPA-роут
+    #     ВНУТРИ /admin (см. spa-router.js), поэтому вход в панель ему по-прежнему
+    #     нужен; но sales.html обращается только к /api/sales/* и /api/users/me,
+    #     ни одного вызова этих шести роутеров в нём нет.
+    #   * OPERATOR остаётся на router-level (это его рабочие разделы: показания,
+    #     платежи, счета, резиденты, тарифы — на чтение), а опасная запись сужена
+    #     до ROOT/ADMIN пер-эндпоинтно внутри самих роутеров (manage_only).
+    # Router-level и route-level Depends складываются по И, поэтому здесь стоит
+    # САМЫЙ ШИРОКИЙ набор ролей, а сужение делается на конкретных эндпоинтах.
+    billing_staff = [Depends(require_any_role(
+        RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR))]
 
     app.include_router(auth_routes.router)
     app.include_router(dashboard.router)
     app.include_router(api_users.router)
     app.include_router(api_blocks.router)
-    app.include_router(api_tariffs.router, dependencies=staff_only)
-    app.include_router(api_residents.router, dependencies=staff_only)
-    app.include_router(api_readings.router, dependencies=staff_only)
-    app.include_router(api_tenants.router, dependencies=staff_only)
-    app.include_router(api_invoices.router, dependencies=staff_only)
-    app.include_router(api_payments.router, dependencies=staff_only)
+    app.include_router(api_tariffs.router, dependencies=billing_staff)
+    app.include_router(api_residents.router, dependencies=billing_staff)
+    app.include_router(api_readings.router, dependencies=billing_staff)
+    app.include_router(api_tenants.router, dependencies=billing_staff)
+    app.include_router(api_invoices.router, dependencies=billing_staff)
+    app.include_router(api_payments.router, dependencies=billing_staff)
     app.include_router(api_notifications.router)
     app.include_router(api_dashboard.router)
     app.include_router(api_logs.router)

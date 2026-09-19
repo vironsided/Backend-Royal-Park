@@ -13,13 +13,22 @@ from ..models import (
     Payment, PaymentApplication, PaymentMethod,
     Invoice, InvoiceStatus, PaymentLog, user_residents
 )
-from ..deps import get_current_user
+from ..deps import get_current_user, require_any_role
 from ..utils import now_baku, to_baku_datetime
 from ..utils import build_invoice_number
 from .api_payment_logic import auto_apply_advance, _recompute_invoice_status, _to_int
 
 
 router = APIRouter(prefix="/api/payments", tags=["payments-api"])
+
+# audit res-2: кнопка «Принять платёж» (.btn-accept-payment) в админке скрыта у
+# OPERATOR — приём наличных/безнала это заведение денег в систему, и штатно он
+# этого не делает. Сужаем ТОЛЬКО создание платежа до ROOT/ADMIN.
+# ВАЖНО: разнесение платежа по счетам (/{id}/applications, /auto-apply,
+# /auto-apply-advance) — это как раз ежедневная работа оператора на странице
+# /payment-view, которая для него ничем не урезана, причём auto-apply-advance
+# дёргается автоматически по таймеру. Эти эндпоинты НЕ ограничиваем.
+manage_only = [Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN))]
 
 
 # Pydantic models
@@ -404,7 +413,7 @@ def get_payment_api(
     }
 
 
-@router.post("/")
+@router.post("/", dependencies=manage_only)
 def create_payment_api(
     payment: PaymentCreate,
     user: User = Depends(get_current_user),

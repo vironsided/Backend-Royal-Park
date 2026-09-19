@@ -180,6 +180,16 @@ def _build_invoice_line_payment_map(
     return result
 
 
+# Статусы, в которых счёт считается зафиксированным документом:
+# суммы уже закрыты оплатой (или счёт отменён), поэтому пересчитывать их
+# по текущим данным тарифа при обычном ЧТЕНИИ нельзя.
+_FINALIZED_INVOICE_STATUSES = {
+    InvoiceStatus.PAID,
+    InvoiceStatus.OVERPAID,
+    InvoiceStatus.CANCELED,
+}
+
+
 def _ensure_auto_sewerage_line(db: Session, inv: Invoice) -> None:
     if not inv or not inv.id:
         return
@@ -193,15 +203,23 @@ def _ensure_auto_sewerage_line(db: Session, inv: Invoice) -> None:
     )
 
     has_real_sewerage = any(mt == MeterType.SEWERAGE for _ln, _rd, mt in rows)
-    auto_line = (
+    # ИДЕМПОТЕНТНОСТЬ (деньги): авто-строка "Канализация" должна быть ровно одна.
+    # Раньше брали .first(); если из-за гонки (два одновременных открытия счёта)
+    # или старых данных строк оказалось несколько, лишние молча удваивали начисление.
+    # Теперь берём все, работаем с самой ранней, а дубли удаляем.
+    auto_lines = (
         db.query(InvoiceLine)
         .filter(
             InvoiceLine.invoice_id == inv.id,
             InvoiceLine.meter_reading_id.is_(None),
             InvoiceLine.description.ilike("Канализация%"),
         )
-        .first()
+        .order_by(InvoiceLine.id.asc())
+        .all()
     )
+    auto_line = auto_lines[0] if auto_lines else None
+    for extra_line in auto_lines[1:]:
+        db.delete(extra_line)
 
     if has_real_sewerage:
         for ln, rd, mt in rows:
@@ -619,8 +637,22 @@ def get_resident_invoice_detail(
     block = resident.block if resident else None
     
     # Get invoice lines
-    _ensure_auto_sewerage_line(db, inv)
-    db.flush()
+    #
+    # БЕЗОПАСНОСТЬ (деньги): это GET, и он НЕ должен молча переписывать
+    # уже выставленный счёт. Поэтому:
+    #  1) счета в финальных статусах (PAID/OVERPAID/CANCELED) читаем строго read-only —
+    #     иначе правка тарифа задним числом меняла бы закрытый документ;
+    #  2) для остальных счетов берём блокировку строки счёта (SELECT ... FOR UPDATE)
+    #     на время досоздания авто-строки "Канализация". Без неё два одновременных
+    #     открытия одного счёта (житель в кабинете + оператор в админке) оба
+    #     не находили строку и оба её вставляли -> двойное начисление.
+    #     На SQLite (тесты) with_for_update() безвреден — диалект его игнорирует.
+    is_finalized_invoice = inv.status in _FINALIZED_INVOICE_STATUSES
+    if not is_finalized_invoice:
+        from sqlalchemy import select
+        db.execute(select(Invoice.id).where(Invoice.id == inv.id).with_for_update()).first()
+        _ensure_auto_sewerage_line(db, inv)
+        db.flush()
     lines = db.query(InvoiceLine).filter(InvoiceLine.invoice_id == inv.id).all()
     
     # Get payments for this invoice
@@ -637,7 +669,9 @@ def get_resident_invoice_detail(
         func.coalesce(func.sum(InvoiceLine.amount_total), 0)
     ).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
     
-    if abs(float(inv.amount_total or 0) - float(lines_sum)) > 0.01:
+    # Итог синхронизируем со строками только для «живых» счетов.
+    # У закрытых (PAID/OVERPAID/CANCELED) сумма зафиксирована — просмотр её не меняет.
+    if not is_finalized_invoice and abs(float(inv.amount_total or 0) - float(lines_sum)) > 0.01:
         inv.amount_total = Decimal(str(lines_sum))
         net_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_net), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
         vat_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_vat), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
@@ -1599,16 +1633,31 @@ def create_resident_payment(
     selected_remaining_total = Decimal("0")
 
     # Validate payment method
-    method_value = data.method.upper()
+    method_value = (data.method or "").upper()
     is_advance = (method_value == "ADVANCE")
-    
+
+    # БЕЗОПАСНОСТЬ (деньги): этот эндпоинт доступен ТОЛЬКО роли RESIDENT
+    # (см. _get_resident_user), поэтому здесь допустим лишь ADVANCE —
+    # списание УЖЕ имеющегося аванса, то есть перераспределение денег,
+    # которые резидент реально внёс ранее.
+    #
+    # CARD/TRANSFER/CASH/ONLINE отсюда запрещены: они означают приход НОВЫХ денег,
+    # а факт прихода подтверждает не браузер жителя, а:
+    #   - колбэк Azericard (_confirm_local_transaction_from_callback в api_azericard.py,
+    #     легальный путь карты из кабинета — POST /api/azericard/initiate,
+    #     см. public/user/pages/report-payment.html),
+    #   - либо сотрудник через staff-эндпоинт /api/payments/ (наличные/перевод в кассе).
+    # Без этой проверки житель мог curl-ом создать себе платёж на любую сумму
+    # и обнулить задолженность / нарисовать аванс, не заплатив ничего.
+    #
+    # Легальный UI кабинета сюда шлёт только method=ADVANCE (карта уходит на
+    # /api/azericard/initiate и до этого места не доходит), поэтому запрет
+    # не ломает ни один рабочий сценарий жителя.
     if not is_advance:
-        valid_methods = {m.value for m in PaymentMethod}
-        if method_value not in valid_methods:
-            # Если это не аванс и не известный метод, то для онлайн-оплат из портала 
-            # мы разрешаем только CARD или TRANSFER. 
-            # Если пришло что-то странное - принудительно ставим CARD.
-            method_value = "CARD"
+        raise HTTPException(
+            status_code=403,
+            detail="Оплата этим способом из личного кабинета недоступна. Используйте оплату картой или обратитесь в офис.",
+        )
 
     from .api_payment_logic import (
         apply_payment_to_invoices,
@@ -1842,7 +1891,11 @@ def create_resident_payment(
             message=message
         )
     
-    # Для обычных платежей (CARD, TRANSFER и т.д.) создаем новый платеж
+    # Для обычных платежей (CARD, TRANSFER и т.д.) создаем новый платеж.
+    # ВНИМАНИЕ: с момента запрета не-ADVANCE методов (см. проверку метода выше)
+    # эта ветка для роли RESIDENT НЕДОСТИЖИМА и оставлена без изменений намеренно —
+    # как справочная логика применения платежа к счетам. Не снимать запрет выше,
+    # не подключив сюда подтверждение платёжного шлюза.
     payment = Payment(
         resident_id=data.resident_id,
         received_at=now_baku(),

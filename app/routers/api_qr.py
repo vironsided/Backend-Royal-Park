@@ -8,7 +8,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..database import get_db
-from ..models import User, QRToken
+from ..models import User, QRToken, RoleEnum
+from ..deps import get_current_user, can_manage_user
 from ..security import hash_password
 
 
@@ -61,12 +62,33 @@ def generate_secure_token() -> str:
 def generate_qr_token(
     user_id: int,
     db: Session = Depends(get_db),
+    actor: User = Depends(get_current_user),
 ):
-    """Генерирует одноразовый QR-токен для пользователя"""
+    """Генерирует одноразовый QR-токен для пользователя.
+
+    P0-фикс: эндпоинт раньше был анонимным (роутер подключён без staff_only),
+    из-за чего любой аноним мог выпустить одноразовый токен на ЛЮБОЙ user_id
+    (в т.ч. ROOT) и затем анонимно установить свой пароль -> захват аккаунта.
+    Токены выпускают только сотрудники: генерация — часть онбординга, который
+    ведёт ROOT/ADMIN из админ-панели (users.html / tenants.html, credentials
+    include). /verify и /change-password остаются анонимными — новый пользователь
+    ещё не залогинен, поэтому auth вешаем ТОЛЬКО на генерацию, а не на весь роутер.
+    """
+    # Управлять пользователями (и, значит, выпускать им токены) могут только
+    # ROOT и ADMIN — та же политика, что в api_users (_ensure_user_admin_access).
+    if actor.role not in (RoleEnum.ROOT, RoleEnum.ADMIN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
+
     user = db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Пользователь не найден")
-    
+
+    # ADMIN не должен выпускать токен на ROOT/другого ADMIN (иначе получил бы
+    # захват вышестоящего аккаунта тем же путём). can_manage_user: ROOT — кому
+    # угодно; ADMIN — только OPERATOR/RESIDENT/SALES.
+    if not can_manage_user(user, actor):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Недостаточно прав")
+
     # Проверяем, что у пользователя есть временный пароль
     if not user.require_password_change or not user.temp_password_plain:
         raise HTTPException(
@@ -205,7 +227,12 @@ def change_password_via_qr(
     user.require_password_change = False
     user.temp_password_plain = None
     user.last_password_change_at = datetime.utcnow()
-    
+    # Смена пароля отзывает все прежние сессии пользователя (тот же паттерн, что
+    # при админском сбросе в api_users). Онбординг это не ломает: пользователь
+    # пока не залогинен — после установки пароля он входит заново и получает
+    # токен с актуальным session_version.
+    user.session_version = (user.session_version or 0) + 1
+
     # Помечаем токен как использованный
     qr_token.is_used = True
     qr_token.used_at = datetime.utcnow()

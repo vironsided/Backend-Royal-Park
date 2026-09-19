@@ -10,11 +10,17 @@ import json
 
 from ..database import get_db
 from ..models import Tariff, TariffStep, MeterType, CustomerType, ResidentMeter, MeterReading
-from ..deps import get_current_user
-from ..models import User
+from ..deps import get_current_user, require_any_role
+from ..models import User, RoleEnum
 
 router = APIRouter(prefix="/api/tariffs", tags=["tariffs-api"])
 DISABLED_TARIFF_TYPES = {MeterType.SEWERAGE.value}
+
+# audit res-2: тариф — это цена, по которой считается весь биллинг. В админке у
+# OPERATOR на странице тарифов скрыты «создать» и колонка действий
+# (admin/index.html, блок OPERATOR) — он тарифы только читает. Сужаем запись до
+# ROOT/ADMIN, GET оставляем как было (тарифы нужны в показаниях и резидентах).
+manage_only = [Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN))]
 
 
 class TariffStepOut(BaseModel):
@@ -283,8 +289,8 @@ def get_tariff_api(
 
 
 
-@router.post("", response_model=TariffOut, status_code=status.HTTP_201_CREATED)
-@router.post("/", response_model=TariffOut, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=TariffOut, status_code=status.HTTP_201_CREATED, dependencies=manage_only)
+@router.post("/", response_model=TariffOut, status_code=status.HTTP_201_CREATED, dependencies=manage_only)
 def create_tariff_api(
     payload: TariffCreate,
     db: Session = Depends(get_db),
@@ -386,7 +392,7 @@ def create_tariff_api(
 
 
 
-@router.put("/{tariff_id}", response_model=TariffOut)
+@router.put("/{tariff_id}", response_model=TariffOut, dependencies=manage_only)
 def update_tariff_api(
     tariff_id: int,
     payload: TariffUpdate,
@@ -508,7 +514,7 @@ def update_tariff_api(
 
 
 
-@router.delete("/{tariff_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{tariff_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=manage_only)
 def delete_tariff_api(
     tariff_id: int,
     db: Session = Depends(get_db),

@@ -14,7 +14,7 @@ from ..models import (
     PaymentApplication, Payment, PaymentMethod,
     Tariff, ResidentMeter, MeterReading, MeterType, CustomerType, user_residents
 )
-from ..deps import get_current_user
+from ..deps import get_current_user, require_any_role
 from ..utils import to_baku_datetime, create_invoice_notification, now_baku, build_invoice_number
 import logging
 
@@ -22,6 +22,14 @@ logger = logging.getLogger("royalpark")
 
 
 router = APIRouter(prefix="/api/invoices", tags=["invoices-api"])
+
+# audit res-2: у OPERATOR в админке скрыт весь блок .invoices-actions (массовое
+# выставление счетов + экспорт), блок ежемесячной выписки #monthlyIssueBlock и
+# весь .invoice-actions-section в карточке счёта (сохранить / отменить /
+# перевыставить) — см. admin/index.html. То есть выставление и правку счетов
+# через штатный интерфейс он не делает. Сужаем эти операции до ROOT/ADMIN;
+# чтение списка и карточки счёта оставляем — оператору они нужны в платежах.
+manage_only = [Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN))]
 
 
 # Pydantic models
@@ -68,6 +76,55 @@ class InvoiceOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# Финализированные счета: деньги по ним уже зафиксированы оплатой или отменой.
+# GET-хендлеры не имеют права их пересчитывать (см. _is_finalized_invoice).
+FINALIZED_INVOICE_STATUSES = (
+    InvoiceStatus.PAID,
+    InvoiceStatus.OVERPAID,
+    InvoiceStatus.CANCELED,
+)
+
+
+def _is_finalized_invoice(inv: Invoice) -> bool:
+    """
+    Счёт "закрыт" (оплачен/переплачен/отменён) — его суммы менять задним числом нельзя.
+
+    Раньше открытие карточки такого счёта пересчитывало строку "Вода" и
+    добавляло/меняло строку "Канализация" по ТЕКУЩЕМУ проценту канализации в тарифе
+    и КОММИТИЛО это (см. _get_invoice_detail_internal). То есть смена
+    sewerage_percent бухгалтерией задним числом меняла ИТОГО уже оплаченного счёта
+    (для LEGAL — вплоть до удвоения), при этом статус оставался PAID.
+    Выставление и пересчёт счетов (POST/PUT, генерация) этим не затронуты —
+    ограничение действует только в GET-хендлерах.
+    """
+    return inv.status in FINALIZED_INVOICE_STATUSES
+
+
+def _display_invoice_number(db: Session, inv: Invoice) -> Optional[str]:
+    """
+    Номер счёта ТОЛЬКО для отображения — БЕЗ записи в БД.
+
+    Номер присваивается один раз, при переходе DRAFT -> ISSUED
+    (bulk-issue / update / reissue), и дальше считается реквизитом документа.
+    GET-хендлеры его больше не переписывают: приведение к каноническому виду прямо
+    в выдаче списка/карточки ломало сразу несколько вещей.
+      - Счёт начального долга хранится под стабильным номером OPEN/{resident_id:06d} —
+        именно по этой строке его ищет _get_opening_invoice() в api_residents.py.
+        После перезаписи номера начальный долг в карточке резидента показывался
+        нулевым, а следующее сохранение долга заводило ВТОРОЙ счёт начального долга
+        (период 1900-02, 1900-03, ...), то есть долг задваивался.
+      - Канонический номер содержит min(user_id) привязанных жителей, поэтому при
+        смене жителя номер уже выставленного (и даже оплаченного) счёта менялся
+        задним числом.
+
+    Если номера нет (черновик, легаси-строка с NULL), показываем канонический —
+    как и раньше, но не сохраняем его.
+    """
+    if (inv.number or "").strip():
+        return inv.number
+    return build_invoice_number(db, inv.resident_id, inv.period_year, inv.period_month)
 
 
 def _to_int(val: str | None) -> int | None:
@@ -168,29 +225,33 @@ def _list_invoices_internal(
             method_sets.setdefault(int(invoice_id), set()).add(method_key)
         payment_methods_map = {inv_id: sorted(list(methods)) for inv_id, methods in method_sets.items()}
     
-    # Проверяем и исправляем amount_total для каждого счета, если он не совпадает с суммой строк
+    # Проверяем и исправляем amount_total для каждого счета, если он не совпадает с суммой строк.
+    # Номер счёта здесь НЕ трогаем (см. _display_invoice_number): выдача списка не должна
+    # переименовывать документы, иначе теряется номер счёта начального долга OPEN/...
+    # По финализированным счетам (PAID/OVERPAID/CANCELED) расхождение считаем ТОЛЬКО
+    # для отображения и в БД не пишем — выдача остаётся прежней, но GET больше не
+    # меняет деньги по закрытому документу.
     needs_commit = False
+    display_amounts: dict[int, tuple[float, float, float]] = {}
     for inv in items:
-        canonical_number = build_invoice_number(db, inv.resident_id, inv.period_year, inv.period_month)
-        if inv.number != canonical_number:
-            inv.number = canonical_number
-            needs_commit = True
-
         lines_sum = db.query(
             func.coalesce(func.sum(InvoiceLine.amount_total), 0)
         ).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
-        
+
         if abs(float(inv.amount_total or 0) - float(lines_sum)) > 0.01:
-            inv.amount_total = Decimal(str(lines_sum))
             net_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_net), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
             vat_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_vat), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
-            inv.amount_net = Decimal(str(net_sum))
-            inv.amount_vat = Decimal(str(vat_sum))
-            needs_commit = True
-    
+            if _is_finalized_invoice(inv):
+                display_amounts[inv.id] = (float(net_sum), float(vat_sum), float(lines_sum))
+            else:
+                inv.amount_total = Decimal(str(lines_sum))
+                inv.amount_net = Decimal(str(net_sum))
+                inv.amount_vat = Decimal(str(vat_sum))
+                needs_commit = True
+
     if needs_commit:
         db.commit()
-    
+
     # Получаем блоки и резидентов для формирования данных
     blocks = {b.id: b for b in db.query(Block).all()}
     
@@ -202,7 +263,12 @@ def _list_invoices_internal(
     for inv in items:
         resident = inv.resident
         block = blocks.get(resident.block_id)
-        
+
+        amt_net, amt_vat, amt_total = display_amounts.get(
+            inv.id,
+            (float(inv.amount_net), float(inv.amount_vat), float(inv.amount_total)),
+        )
+
         result.append({
             "id": inv.id,
             "resident_id": inv.resident_id,
@@ -212,15 +278,15 @@ def _list_invoices_internal(
             "unit_number": resident.unit_number,
             "resident_user_full_name": resident_user_names.get(int(inv.resident_id)) if inv.resident_id else None,
             "resident_user_phone": resident_user_phones.get(int(inv.resident_id)) if inv.resident_id else None,
-            "number": inv.number,
+            "number": _display_invoice_number(db, inv),
             "status": inv.status.value,
             "due_date": inv.due_date,
             "notes": inv.notes,
             "period_year": inv.period_year,
             "period_month": inv.period_month,
-            "amount_net": float(inv.amount_net),
-            "amount_vat": float(inv.amount_vat),
-            "amount_total": float(inv.amount_total),
+            "amount_net": amt_net,
+            "amount_vat": amt_vat,
+            "amount_total": amt_total,
             "paid_amount": paid_map.get(inv.id, 0.0),
             "payment_methods": payment_methods_map.get(inv.id, []),
             "created_at": inv.created_at,
@@ -375,7 +441,7 @@ def _bulk_issue_internal(
     }
 
 
-@router.post("/bulk-issue", response_model=BulkIssueResponse)
+@router.post("/bulk-issue", response_model=BulkIssueResponse, dependencies=manage_only)
 def bulk_issue_api(
     data: BulkIssueRequest,
     db: Session = Depends(get_db),
@@ -396,7 +462,7 @@ def bulk_issue_api(
 class BulkNotifyRequest(BaseModel):
     due_date: Optional[str] = None  # YYYY-MM-DD
 
-@router.post("/bulk-notify")
+@router.post("/bulk-notify", dependencies=manage_only)
 def bulk_notify_api(
     data: BulkNotifyRequest,
     db: Session = Depends(get_db),
@@ -828,18 +894,20 @@ def _get_invoice_detail_internal(db: Session, invoice_id: int):
     if not inv:
         raise HTTPException(status_code=404, detail="Invoice not found")
 
-    canonical_number = build_invoice_number(db, inv.resident_id, inv.period_year, inv.period_month)
-    if inv.number != canonical_number:
-        inv.number = canonical_number
-        db.commit()
-        db.refresh(inv)
-    
+    # Номер счёта в карточке только показываем, но не перезаписываем (см. _display_invoice_number).
+    display_number = _display_invoice_number(db, inv)
+
     resident = inv.resident
     block = resident.block if resident else None
-    
-    # Автодобавление "Канализация" как % от воды (если настроено)
-    _ensure_auto_sewerage_line(db, inv)
-    db.flush()
+
+    # Автодобавление "Канализация" как % от воды (если настроено).
+    # Для финализированных счетов (PAID/OVERPAID/CANCELED) пересчёт не делаем вообще:
+    # их суммы уже зафиксированы оплатой/отменой, и открытие карточки не должно
+    # переписывать деньги задним числом при смене sewerage_percent в тарифе.
+    finalized = _is_finalized_invoice(inv)
+    if not finalized:
+        _ensure_auto_sewerage_line(db, inv)
+        db.flush()
 
     # Получаем строки счета
     lines = db.query(InvoiceLine).filter(InvoiceLine.invoice_id == inv.id).all()
@@ -882,21 +950,30 @@ def _get_invoice_detail_internal(db: Session, invoice_id: int):
         func.coalesce(func.sum(InvoiceLine.amount_total), 0)
     ).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
     
-    # Обновляем amount_total в счете, если он отличается от суммы строк
+    # Обновляем amount_total в счете, если он отличается от суммы строк.
+    # По финализированным счетам расхождение считаем только для отображения (без записи),
+    # чтобы выдача не поменялась, а деньги в БД остались такими, какими их оплатили.
+    amt_net = float(inv.amount_net or 0)
+    amt_vat = float(inv.amount_vat or 0)
+    amt_total = float(inv.amount_total or 0)
     if abs(float(inv.amount_total or 0) - float(lines_sum)) > 0.01:
-        inv.amount_total = Decimal(str(lines_sum))
         # Также пересчитываем net и vat
         net_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_net), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
         vat_sum = db.query(func.coalesce(func.sum(InvoiceLine.amount_vat), 0)).filter(InvoiceLine.invoice_id == inv.id).scalar() or 0
-        inv.amount_net = Decimal(str(net_sum))
-        inv.amount_vat = Decimal(str(vat_sum))
-        db.commit()
-    
+        amt_net = float(net_sum)
+        amt_vat = float(vat_sum)
+        amt_total = float(lines_sum)
+        if not finalized:
+            inv.amount_total = Decimal(str(lines_sum))
+            inv.amount_net = Decimal(str(net_sum))
+            inv.amount_vat = Decimal(str(vat_sum))
+            db.commit()
+
     # Считаем paid_total по ВСЕМ применениям (включая скрытые), для правильного расчета остатка
     paid_total = db.query(func.coalesce(func.sum(PaymentApplication.amount_applied), 0))\
                    .filter(PaymentApplication.invoice_id == inv.id).scalar() or 0
-    remaining = float(inv.amount_total or 0) - float(paid_total)
-    
+    remaining = amt_total - float(paid_total)
+
     payments = []
     for app in apps:
         p = app.payment
@@ -1189,16 +1266,16 @@ def _get_invoice_detail_internal(db: Session, invoice_id: int):
         "resident_code": f"{block.name if block else ''} / {resident.unit_number}" if block else resident.unit_number,
         "resident_user_full_name": resident_user_names.get(int(inv.resident_id)) if inv.resident_id else None,
         "resident_user_phone": resident_user_phones.get(int(inv.resident_id)) if inv.resident_id else None,
-        "number": inv.number,
+        "number": display_number,
         "status": inv.status.value,
         "due_date": inv.due_date,
         "notes": inv.notes,
         "period_year": inv.period_year,
         "period_month": inv.period_month,
         "period_dates": period_dates,
-        "amount_net": float(inv.amount_net),
-        "amount_vat": float(inv.amount_vat),
-        "amount_total": float(inv.amount_total),
+        "amount_net": amt_net,
+        "amount_vat": amt_vat,
+        "amount_total": amt_total,
         "paid_amount": float(paid_total),
         "remaining_amount": remaining,
         "lines": lines_out,
@@ -1222,7 +1299,7 @@ class InvoiceUpdateRequest(BaseModel):
     notes: Optional[str] = None
 
 
-@router.put("/{invoice_id}")
+@router.put("/{invoice_id}", dependencies=manage_only)
 def update_invoice_api(
     invoice_id: int,
     data: InvoiceUpdateRequest,
@@ -1280,7 +1357,7 @@ class InvoiceCancelRequest(BaseModel):
     reason: str
 
 
-@router.post("/{invoice_id}/cancel")
+@router.post("/{invoice_id}/cancel", dependencies=manage_only)
 def cancel_invoice_api(
     invoice_id: int,
     data: InvoiceCancelRequest,
@@ -1318,7 +1395,7 @@ class InvoiceReissueRequest(BaseModel):
     comment: Optional[str] = None
 
 
-@router.post("/{invoice_id}/reissue")
+@router.post("/{invoice_id}/reissue", dependencies=manage_only)
 def reissue_invoice_api(
     invoice_id: int,
     data: InvoiceReissueRequest,
