@@ -22,8 +22,12 @@ from ..models import (
     Tariff, MeterType, CustomerType, Block
     , OnlineTransaction
 )
-from ..security import get_user_id_from_session
+from ..security import get_user_from_session
 from ..utils import build_invoice_number, now_baku, to_baku_datetime
+from ..services.payment_line_allocation import (
+    build_invoice_line_payment_map as _build_invoice_line_payment_map,
+    normalize_selected_line_ids_for_water_sewer as _normalize_selected_line_ids_for_water_sewer,
+)
 import logging
 
 logger = logging.getLogger("royalpark")
@@ -44,140 +48,6 @@ def _effective_sewerage_percent(tariff: Tariff | None) -> Decimal:
     except Exception:
         percent = Decimal("0")
     return percent if percent > 0 else Decimal("0")
-
-
-def _parse_selected_line_ids(reference: str | None) -> list[int]:
-    if not reference:
-        return []
-    marker = "LINESEL:"
-    idx = reference.find(marker)
-    if idx < 0:
-        return []
-    raw = reference[idx + len(marker):].split("|")[0]
-    out: list[int] = []
-    for token in raw.split(","):
-        token = token.strip()
-        if not token:
-            continue
-        try:
-            out.append(int(token))
-        except Exception:
-            continue
-    return out
-
-
-def _is_water_line_description(desc: str | None) -> bool:
-    low = (desc or "").lower()
-    return ("вода" in low) or ("water" in low) or ("meter_cold_water" in low)
-
-
-def _is_sewerage_line_description(desc: str | None) -> bool:
-    low = (desc or "").lower()
-    return ("канализац" in low) or ("sewerage" in low) or ("meter_sewerage" in low)
-
-
-def _normalize_selected_line_ids_for_water_sewer(
-    selected_ids: list[int],
-    line_desc_by_id: dict[int, str],
-) -> list[int]:
-    ids = [int(x) for x in (selected_ids or []) if int(x) > 0]
-    if not ids:
-        return []
-
-    unique_ids = list(dict.fromkeys(ids))
-    selected_has_bundle = any(
-        _is_water_line_description(line_desc_by_id.get(lid))
-        or _is_sewerage_line_description(line_desc_by_id.get(lid))
-        for lid in unique_ids
-    )
-    if not selected_has_bundle:
-        return unique_ids
-
-    sewer_ids = [
-        lid for lid, desc in line_desc_by_id.items()
-        if _is_sewerage_line_description(desc)
-    ]
-    water_ids = [
-        lid for lid, desc in line_desc_by_id.items()
-        if _is_water_line_description(desc)
-    ]
-
-    if not sewer_ids or not water_ids:
-        return unique_ids
-
-    for lid in sewer_ids + water_ids:
-        if lid not in unique_ids:
-            unique_ids.append(lid)
-
-    def _key(lid: int) -> tuple[int, int]:
-        if lid in sewer_ids:
-            return (0, unique_ids.index(lid))
-        if lid in water_ids:
-            return (1, unique_ids.index(lid))
-        return (2, unique_ids.index(lid))
-
-    return [lid for lid in sorted(unique_ids, key=_key)]
-
-
-def _build_invoice_line_payment_map(
-    lines: list[InvoiceLine],
-    apps: list[PaymentApplication],
-) -> dict[int, dict]:
-    sorted_lines = sorted(lines, key=lambda l: l.id or 0)
-    line_desc_by_id = {
-        int(l.id): (l.description or "")
-        for l in sorted_lines
-        if l.id is not None
-    }
-    line_totals = {int(l.id): Decimal(str(l.amount_total or 0)) for l in sorted_lines if l.id is not None}
-    paid_by_line = {lid: Decimal("0") for lid in line_totals}
-
-    def allocate(amount: Decimal, line_ids: list[int]) -> Decimal:
-        remaining_amt = Decimal(str(amount or 0))
-        for lid in line_ids:
-            if remaining_amt <= 0:
-                break
-            if lid not in line_totals:
-                continue
-            capacity = max(line_totals[lid] - paid_by_line[lid], Decimal("0"))
-            if capacity <= 0:
-                continue
-            take = min(capacity, remaining_amt)
-            paid_by_line[lid] += take
-            remaining_amt -= take
-        return remaining_amt
-
-    ordered_apps = sorted(
-        apps or [],
-        key=lambda a: (
-            a.created_at or datetime.min,
-            a.id or 0,
-        ),
-    )
-    default_order = list(line_totals.keys())
-    for app in ordered_apps:
-        app_amt = Decimal(str(getattr(app, "amount_applied", 0) or 0))
-        if app_amt <= 0:
-            continue
-        selected_ids = _parse_selected_line_ids(getattr(app, "reference", None))
-        if selected_ids:
-            normalized_selected_ids = _normalize_selected_line_ids_for_water_sewer(selected_ids, line_desc_by_id)
-            allocate(app_amt, normalized_selected_ids)
-        else:
-            allocate(app_amt, default_order)
-
-    result: dict[int, dict] = {}
-    for lid, total in line_totals.items():
-        paid = _money2(paid_by_line.get(lid, Decimal("0")))
-        remaining = _money2(max(total - paid, Decimal("0")))
-        if remaining <= Decimal("0.0001"):
-            status_text = "Оплачена"
-        elif paid > Decimal("0.0001"):
-            status_text = "Частично"
-        else:
-            status_text = "Не оплачена"
-        result[lid] = {"paid": paid, "remaining": remaining, "status": status_text}
-    return result
 
 
 # Статусы, в которых счёт считается зафиксированным документом:
@@ -1276,11 +1146,8 @@ def _resident_appeal_from_notif(notif: Notification, resident_code: str) -> Resi
 
 def _get_resident_user(request: Request, db: Session) -> Optional[User]:
     """Get current resident user from session."""
-    uid = get_user_id_from_session(request)
-    if not uid:
-        return None
-    user = db.get(User, uid)
-    if not user or user.role != RoleEnum.RESIDENT or not user.is_active:
+    user = get_user_from_session(request, db)
+    if not user or user.role != RoleEnum.RESIDENT:
         return None
     return user
 
@@ -2632,12 +2499,9 @@ def get_payment_history(
     q: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    user_id = get_user_id_from_session(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.get(User, user_id)
+    user = _get_resident_user(request, db)
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     resident_ids = [
         r[0]
@@ -2754,12 +2618,9 @@ def get_payment_history_detail(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    user_id = get_user_id_from_session(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.get(User, user_id)
+    user = _get_resident_user(request, db)
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Not authenticated")
     resident_ids = {
         r[0]
         for r in db.query(user_residents.c.resident_id)
@@ -2924,12 +2785,9 @@ def get_advance_history(
     per_page: int = 15,
     db: Session = Depends(get_db),
 ):
-    user_id = get_user_id_from_session(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.get(User, user_id)
+    user = _get_resident_user(request, db)
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     resident_ids = [
         r[0] for r in db.query(user_residents.c.resident_id)
@@ -3022,12 +2880,9 @@ def get_advance_history_detail(
     db: Session = Depends(get_db),
 ):
     """Return invoice line breakdown for a specific PaymentApplication."""
-    user_id = get_user_id_from_session(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    user = db.get(User, user_id)
+    user = _get_resident_user(request, db)
     if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
     resident_ids = [
         r[0] for r in db.query(user_residents.c.resident_id)

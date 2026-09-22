@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User, RoleEnum
 from ..deps import get_current_user, can_manage_user
-from ..security import hash_password, verify_password, get_user_id_from_session
+from ..security import hash_password, verify_password
 from ..utils import generate_temp_password, to_baku_datetime, looks_like_image, IMAGE_MAX_UPLOAD_BYTES
+from ..image_utils import image_to_webp, ImageConversionError
 
 
 router = APIRouter(prefix="/api/users", tags=["users-api"])
@@ -161,23 +162,32 @@ def create_user_api(
 def _save_avatar(file: UploadFile, user_id: int) -> str | None:
     if not file:
         return None
-    if file.content_type not in ("image/jpeg", "image/png", "image/webp"):
+    if not file.content_type or not file.content_type.startswith("image/"):
         return None
-    ext = ".jpg" if file.content_type == "image/jpeg" else (".png" if file.content_type == "image/png" else ".webp")
-    data = file.file.read()
+    data = file.file.read(IMAGE_MAX_UPLOAD_BYTES + 1)
     # audit F-14: enforce a size limit and validate real image bytes (don't trust header).
     if not data or len(data) > IMAGE_MAX_UPLOAD_BYTES or not looks_like_image(data):
         raise HTTPException(status_code=400, detail="Недопустимый файл изображения")
+    try:
+        webp_data = image_to_webp(
+            data,
+            max_dimension=1024,
+            quality=82,
+            min_quality=58,
+            target_max_bytes=350 * 1024,
+        )
+    except ImageConversionError as exc:
+        raise HTTPException(status_code=400, detail="Недопустимый файл изображения") from exc
     base_dir = pathlib.Path("uploads/avatars") / str(user_id)
     base_dir.mkdir(parents=True, exist_ok=True)
-    path = base_dir / f"avatar{ext}"
+    path = base_dir / "avatar.webp"
     with open(path, "wb") as f:
-        f.write(data)
-    rel_path = f"/uploads/avatars/{user_id}/avatar{ext}"
+        f.write(webp_data)
+    rel_path = f"/uploads/avatars/{user_id}/avatar.webp"
     return rel_path
 
 
-def _delete_avatar_files(user_id: int) -> None:
+def _delete_avatar_files(user_id: int, keep: str | None = None) -> None:
     """Delete stored avatar files for a user, if they exist."""
     try:
         base_dir = pathlib.Path("uploads/avatars") / str(user_id)
@@ -185,7 +195,7 @@ def _delete_avatar_files(user_id: int) -> None:
             return
         for path in base_dir.glob("avatar.*"):
             try:
-                if path.is_file():
+                if path.is_file() and path.name != keep:
                     path.unlink()
             except Exception:
                 # Non-fatal cleanup failure must not break profile update.
@@ -241,9 +251,9 @@ async def update_current_user_profile(
 
     # Обработка аватара
     if avatar and avatar.filename:
-        _delete_avatar_files(user.id)
         rel = _save_avatar(avatar, user.id)
         if rel:
+            _delete_avatar_files(user.id, keep="avatar.webp")
             user.avatar_path = rel
     
     db.commit()

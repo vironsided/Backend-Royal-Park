@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from .config import settings
 from .database import Base, engine, SessionLocal
 from .models import User, RoleEnum
-from .security import hash_password, get_user_id_from_session
+from .security import hash_password, get_session_data, get_user_from_session
 from .deps import require_any_role
 from .routers import auth_routes, dashboard, api_users, api_blocks, api_tariffs, api_residents, api_readings, api_tenants, api_invoices, api_payments, api_notifications, api_dashboard, api_logs, api_qr, api_payment, api_resident_dashboard, api_news, api_azericard, api_sales, push_routes, api_access
 
@@ -527,14 +527,12 @@ def create_app() -> FastAPI:
             path = request.url.path.rstrip("/") or "/"
             if "public" in path.split("/") and path not in ANON_PUBLIC_ALLOW:
                 allowed = False
-                uid = get_user_id_from_session(request)
-                if uid is not None:
-                    db = SessionLocal()
-                    try:
-                        u = db.get(User, uid)
-                        allowed = bool(u and u.is_active and u.role in STAFF_ROLES)
-                    finally:
-                        db.close()
+                db = SessionLocal()
+                try:
+                    u = get_user_from_session(request, db)
+                    allowed = bool(u and u.role in STAFF_ROLES)
+                finally:
+                    db.close()
                 if not allowed:
                     return JSONResponse(status_code=401, content={"detail": "Authentication required"})
         return await call_next(request)
@@ -559,12 +557,13 @@ def create_app() -> FastAPI:
         if request.method != "OPTIONS":
             path = request.url.path
             if path.startswith("/api/") and not any(path.startswith(p) for p in PWD_PENDING_ALLOW):
-                uid = get_user_id_from_session(request)
-                if uid is not None:
+                # Avoid a database checkout for anonymous API traffic.  When a
+                # token exists, validate both its signature/age and session_version.
+                if get_session_data(request):
                     db = SessionLocal()
                     try:
-                        u = db.get(User, uid)
-                        if u and u.is_active and getattr(u, "require_password_change", False):
+                        u = get_user_from_session(request, db)
+                        if u and getattr(u, "require_password_change", False):
                             return JSONResponse(status_code=403, content={"detail": "password_change_required"})
                     finally:
                         db.close()
@@ -601,13 +600,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Not found")
         # Only КПП gate snapshots are access-controlled.
         if target.relative_to(uploads_root).parts[0] == "gate":
-            uid = get_user_id_from_session(request)
-            if uid is None:
-                raise HTTPException(status_code=401, detail="Authentication required")
             db = SessionLocal()
             try:
-                u = db.get(User, uid)
-                if not (u and u.is_active and u.role in gate_view_roles):
+                u = get_user_from_session(request, db)
+                if not u:
+                    raise HTTPException(status_code=401, detail="Authentication required")
+                if u.role not in gate_view_roles:
                     raise HTTPException(status_code=403, detail="Forbidden")
             finally:
                 db.close()
@@ -664,12 +662,16 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     def _start_auto_advance_scheduler():
         from .services.auto_advance_scheduler import start_auto_advance_scheduler
+        from .services.meter_photo_cleanup import start_meter_photo_cleanup_scheduler
         start_auto_advance_scheduler()
+        start_meter_photo_cleanup_scheduler()
 
     @app.on_event("shutdown")
     def _stop_auto_advance_scheduler():
         from .services.auto_advance_scheduler import stop_auto_advance_scheduler
+        from .services.meter_photo_cleanup import stop_meter_photo_cleanup_scheduler
         stop_auto_advance_scheduler()
+        stop_meter_photo_cleanup_scheduler()
 
     return app
 

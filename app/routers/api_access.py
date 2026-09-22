@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import or_
 
 from ..database import get_db
-from ..deps import get_current_user, require_any_role
+from ..deps import require_any_role
 from ..models import (
     User, RoleEnum, Resident, Block,
     AccessVehicle, AccessRequest, AccessEvent,
@@ -21,12 +21,14 @@ from ..services.plates import normalize_plate
 from ..services.access_logic import decide_access
 from ..services.barrier import open_barrier
 from ..utils import looks_like_image, IMAGE_MAX_UPLOAD_BYTES
+from ..image_utils import image_to_webp, ImageConversionError
 from ..config import settings
 
 router = APIRouter(prefix="/api/access", tags=["access"])
 
 GUARD_ROLES = (RoleEnum.GUARD, RoleEnum.ADMIN, RoleEnum.ROOT)
 guard_dep = require_any_role(*GUARD_ROLES)
+resident_dep = require_any_role(RoleEnum.RESIDENT)
 
 
 def _now() -> datetime:
@@ -88,7 +90,7 @@ def _vehicle_out(v: AccessVehicle) -> VehicleOut:
 
 
 @router.get("/my/vehicles", response_model=List[VehicleOut])
-def my_vehicles(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def my_vehicles(user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     q = db.query(AccessVehicle).filter(
         AccessVehicle.type == VehicleType.RESIDENT,
         AccessVehicle.created_by_user_id == user.id,
@@ -97,7 +99,7 @@ def my_vehicles(user: User = Depends(get_current_user), db: Session = Depends(ge
 
 
 @router.post("/my/vehicles", response_model=VehicleOut, status_code=201)
-def add_my_vehicle(body: VehicleIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def add_my_vehicle(body: VehicleIn, user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     plate = normalize_plate(body.plate)
     if not plate:
         raise HTTPException(400, "Некорректный номер")
@@ -116,7 +118,7 @@ def add_my_vehicle(body: VehicleIn, user: User = Depends(get_current_user), db: 
 
 
 @router.delete("/my/vehicles/{vehicle_id}", status_code=204)
-def delete_my_vehicle(vehicle_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_my_vehicle(vehicle_id: int, user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     v = db.get(AccessVehicle, vehicle_id)
     if not v or v.created_by_user_id != user.id or v.type != VehicleType.RESIDENT:
         raise HTTPException(404, "Не найдено")
@@ -134,7 +136,7 @@ class GuestPassIn(BaseModel):
 
 
 @router.get("/my/guest-passes", response_model=List[VehicleOut])
-def my_guest_passes(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def my_guest_passes(user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     q = db.query(AccessVehicle).filter(
         AccessVehicle.type == VehicleType.GUEST,
         AccessVehicle.created_by_user_id == user.id,
@@ -143,7 +145,7 @@ def my_guest_passes(user: User = Depends(get_current_user), db: Session = Depend
 
 
 @router.post("/my/guest-passes", response_model=VehicleOut, status_code=201)
-def add_guest_pass(body: GuestPassIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def add_guest_pass(body: GuestPassIn, user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     plate = normalize_plate(body.plate)
     if not plate:
         raise HTTPException(400, "Некорректный номер")
@@ -159,7 +161,7 @@ def add_guest_pass(body: GuestPassIn, user: User = Depends(get_current_user), db
 
 
 @router.delete("/my/guest-passes/{vehicle_id}", status_code=204)
-def delete_guest_pass(vehicle_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def delete_guest_pass(vehicle_id: int, user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     v = db.get(AccessVehicle, vehicle_id)
     if not v or v.created_by_user_id != user.id or v.type != VehicleType.GUEST:
         raise HTTPException(404, "Не найдено")
@@ -193,13 +195,13 @@ def _request_out(rq: AccessRequest) -> RequestOut:
 
 
 @router.get("/my/requests", response_model=List[RequestOut])
-def my_requests(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def my_requests(user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     q = db.query(AccessRequest).filter(AccessRequest.requester_user_id == user.id).order_by(AccessRequest.id.desc())
     return [_request_out(x) for x in q.all()]
 
 
 @router.post("/my/requests", response_model=RequestOut, status_code=201)
-def create_request(body: RequestIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def create_request(body: RequestIn, user: User = Depends(resident_dep), db: Session = Depends(get_db)):
     plate = normalize_plate(body.plate)
     if not plate:
         raise HTTPException(400, "Некорректный номер")
@@ -587,7 +589,7 @@ def require_camera_key(x_camera_key: Optional[str] = Header(default=None)):
 
 
 def _save_gate_snapshot(file: Optional[UploadFile], gate_event_id: int) -> Optional[str]:
-    """Persist the camera frame to uploads/gate/<id>.jpg and return its /uploads URL."""
+    """Persist a normalized WebP camera frame and return its /uploads URL."""
     if file is None:
         return None
     try:
@@ -598,11 +600,21 @@ def _save_gate_snapshot(file: Optional[UploadFile], gate_event_id: int) -> Optio
         return None
     if not data or len(data) > IMAGE_MAX_UPLOAD_BYTES or not looks_like_image(data):
         return None
+    try:
+        webp_data = image_to_webp(
+            data,
+            max_dimension=1920,
+            quality=80,
+            min_quality=50,
+            target_max_bytes=900 * 1024,
+        )
+    except ImageConversionError:
+        return None
     base = pathlib.Path("uploads/gate")
     base.mkdir(parents=True, exist_ok=True)
-    with open(base / f"{gate_event_id}.jpg", "wb") as f:
-        f.write(data)
-    return f"/uploads/gate/{gate_event_id}.jpg"
+    with open(base / f"{gate_event_id}.webp", "wb") as f:
+        f.write(webp_data)
+    return f"/uploads/gate/{gate_event_id}.webp"
 
 
 _camera_last_seen: dict = {}  # (plate, direction) -> last datetime (in-memory debounce)

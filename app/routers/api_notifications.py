@@ -18,21 +18,15 @@ from ..deps import get_current_user
 from ..services.push_service import send_push_to_users
 from ..utils import get_user_locale_code, tr_locale
 from fastapi import Request
-from ..security import get_user_id_from_session
+from ..security import get_user_from_session
 
 
 def get_current_user_optional(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
     """Возвращает текущего пользователя, если он авторизован; иначе None."""
     try:
-        user_id = get_user_id_from_session(request)
+        return get_user_from_session(request, db)
     except Exception:
         return None
-    if not user_id:
-        return None
-    user = db.get(User, user_id)
-    if not user or not user.is_active:
-        return None
-    return user
 
 
 router = APIRouter(prefix="/api/notifications", tags=["notifications-api"])

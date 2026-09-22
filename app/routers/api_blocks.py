@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 
 from ..database import get_db
 from ..models import Block
-from ..deps import get_current_user, require_any_role
+from ..deps import require_any_role
 from ..models import User, RoleEnum
 
 router = APIRouter(prefix="/api/blocks", tags=["blocks-api"])
@@ -49,7 +49,7 @@ def list_blocks_api(
 def create_block_api(
     payload: BlockCreate,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN)),
 ):
     """
     Создание блока из SPA.
@@ -80,7 +80,7 @@ def update_block_api(
     block_id: int,
     payload: BlockUpdate,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN)),
 ):
     """
     Обновление блока (переименование, изменение статуса).
@@ -118,7 +118,7 @@ def update_block_api(
 def delete_block_api(
     block_id: int,
     db: Session = Depends(get_db),
-    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR)),
+    actor: User = Depends(require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN)),
 ):
     """
     Удаление блока.

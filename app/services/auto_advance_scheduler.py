@@ -24,7 +24,7 @@ from ..models import (
     MeterType,
 )
 from ..routers.api_payment_logic import auto_apply_advance
-from ..utils import now_baku, to_baku_datetime
+from ..utils import now_baku, to_baku_datetime, get_user_locale_code, tr_locale
 import logging
 
 logger = logging.getLogger("royalpark")
@@ -52,7 +52,9 @@ def _build_invoice_label(inv_number: str | None, year: int, month: int) -> str:
     return f"{month:02d}.{year}"
 
 
-def _notify_resident_auto_advance(db, resident_id: int, reference_tag: str, total_applied: float) -> None:
+def _notify_resident_auto_advance(
+    db, resident_id: int, reference_tag: str, total_applied: float
+) -> list[tuple[int, str, str, dict]]:
     rows = (
         db.query(
             Invoice.id,
@@ -68,7 +70,7 @@ def _notify_resident_auto_advance(db, resident_id: int, reference_tag: str, tota
         .all()
     )
     if not rows:
-        return
+        return []
 
     resident = db.get(Resident, resident_id)
     block = resident.block if resident else None
@@ -95,7 +97,7 @@ def _notify_resident_auto_advance(db, resident_id: int, reference_tag: str, tota
     )
     user_ids = [row[0] for row in user_ids]
     if not user_ids:
-        return
+        return []
 
     users = (
         db.query(User)
@@ -107,15 +109,37 @@ def _notify_resident_auto_advance(db, resident_id: int, reference_tag: str, tota
         .all()
     )
 
+    push_payloads: list[tuple[int, str, str, dict]] = []
     for user in users:
         db.add(Notification(
             user_id=user.id,
             resident_id=resident_id,
-            message=message,
+            message=message,  # остаётся русским: его парсит клиент (_parseAdvanceAutoPaymentMessage)
             status=NotificationStatus.UNREAD,
             notification_type=NotificationType.INVOICE.value,
             related_id=rows[0][0] if len(rows) == 1 else None,
         ))
+
+        # Локализованный текст только для push (ОС покажет его как есть).
+        locale = get_user_locale_code(db, user.id)
+        push_title = tr_locale(
+            locale,
+            az="Avansdan avtomatik ödəniş",
+            en="Auto-payment from advance",
+            ru="Авто-оплата из аванса",
+        )
+        push_body = tr_locale(
+            locale,
+            az=f"Avansdan {total_applied:.2f} ₼ silindi.",
+            en=f"{total_applied:.2f} ₼ debited from advance.",
+            ru=f"Списано {total_applied:.2f} ₼ из аванса.",
+        )
+        data = {"type": "INVOICE", "locale": locale}
+        if len(rows) == 1:
+            data["invoice_id"] = str(rows[0][0])
+        push_payloads.append((user.id, push_title, push_body, data))
+
+    return push_payloads
 
 
 def _run_once() -> None:
@@ -186,6 +210,8 @@ def _run_once() -> None:
             .all()
         )
 
+        pending_push: list[tuple[int, str, str, dict]] = []
+
         for resident_id, min_due in rows:
             if not _is_due_for_auto(min_due, now_dt):
                 continue
@@ -197,14 +223,30 @@ def _run_once() -> None:
                 reference_tag=reference_tag
             )
             if affected_count > 0 and total_applied > 0:
-                _notify_resident_auto_advance(
-                    db,
-                    int(resident_id),
-                    reference_tag,
-                    float(total_applied)
+                pending_push.extend(
+                    _notify_resident_auto_advance(
+                        db,
+                        int(resident_id),
+                        reference_tag,
+                        float(total_applied)
+                    )
                 )
 
         db.commit()
+
+        # Отправляем push только после успешного commit, чтобы не уведомлять
+        # при откате транзакции. send_push_to_users безопасен: без активных
+        # FCM-токенов или без Firebase он просто тихо выходит.
+        if pending_push:
+            from ..services.push_service import send_push_to_users
+            for user_id, title, body, data in pending_push:
+                send_push_to_users(
+                    db,
+                    user_ids=[user_id],
+                    title=title,
+                    body=body,
+                    data=data,
+                )
     except Exception as exc:
         logger.error(f"[auto-advance] failed: {exc}")
         db.rollback()

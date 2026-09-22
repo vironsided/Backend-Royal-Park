@@ -1,19 +1,24 @@
 from typing import List, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
-from io import BytesIO
 import json
 import os
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Request, UploadFile, File, Form
-from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_, exists
 
 from ..database import get_db
 from ..utils import looks_like_image, IMAGE_MAX_UPLOAD_BYTES
+from ..image_utils import image_to_webp, ImageConversionError
+from ..services.payment_line_allocation import build_invoice_line_payment_map
+from ..services.meter_photo_cleanup import (
+    cleanup_expired_meter_photos,
+    meter_photo_expiration,
+    meter_photo_disk_path as _photo_disk_path,
+)
 from ..models import (
     User, RoleEnum, Block, Resident, ResidentMeter,
     MeterType, Tariff, MeterReading, ReadingLog, MeterReadingPhoto,
@@ -95,7 +100,7 @@ def _is_water_line_desc(desc: str | None) -> bool:
 
 def _is_sewer_line_desc(desc: str | None) -> bool:
     low = (desc or "").lower()
-    return ("канализац" in low) or ("sewerage" in low) or ("meter_sewerage" in low)
+    return ("канализац" in low) or ("kanaliz" in low) or ("sewerage" in low) or ("meter_sewerage" in low)
 
 
 def _invoice_line_payment_state_for_period(
@@ -136,115 +141,23 @@ def _invoice_line_payment_state_for_period(
     if not all_lines:
         return {}
 
-    line_totals: dict[int, Decimal] = {
-        int(line.id): money(Decimal(str(line.amount_total or 0)))
-        for line in all_lines
-        if line.id is not None
-    }
-    paid_by_line: dict[int, Decimal] = {lid: Decimal("0") for lid in line_totals}
-    line_desc_by_id: dict[int, str] = {
-        int(line.id): (line.description or "")
-        for line in all_lines
-        if line.id is not None
-    }
-    line_reading_id_by_id: dict[int, int | None] = {
-        int(line.id): (int(line.meter_reading_id) if line.meter_reading_id is not None else None)
-        for line in all_lines
-        if line.id is not None
-    }
-
-    def _parse_selected_line_ids(reference: str | None) -> list[int]:
-        if not reference:
-            return []
-        marker = "LINESEL:"
-        idx = reference.find(marker)
-        if idx < 0:
-            return []
-        raw = reference[idx + len(marker):].split("|")[0]
-        out: list[int] = []
-        for token in raw.split(","):
-            token = token.strip()
-            if not token:
-                continue
-            try:
-                out.append(int(token))
-            except Exception:
-                continue
-        return out
-
-    def _is_water_line_desc(desc: str | None) -> bool:
-        low = (desc or "").lower()
-        return ("вода" in low) or ("water" in low) or ("meter_cold_water" in low)
-
-    def _is_sewer_line_desc(desc: str | None) -> bool:
-        low = (desc or "").lower()
-        return ("канализац" in low) or ("sewerage" in low) or ("meter_sewerage" in low)
-
-    def _normalize_selected_ids(selected_ids: list[int]) -> list[int]:
-        ids = [int(x) for x in (selected_ids or []) if int(x) > 0]
-        if not ids:
-            return []
-        unique_ids = list(dict.fromkeys(ids))
-        selected_has_bundle = any(
-            _is_water_line_desc(line_desc_by_id.get(lid)) or _is_sewer_line_desc(line_desc_by_id.get(lid))
-            for lid in unique_ids
-        )
-        if not selected_has_bundle:
-            return unique_ids
-
-        sewer_ids = [lid for lid, desc in line_desc_by_id.items() if _is_sewer_line_desc(desc)]
-        water_ids = [lid for lid, desc in line_desc_by_id.items() if _is_water_line_desc(desc)]
-        if not sewer_ids or not water_ids:
-            return unique_ids
-
-        for lid in sewer_ids + water_ids:
-            if lid not in unique_ids:
-                unique_ids.append(lid)
-
-        def _key(lid: int) -> tuple[int, int]:
-            if lid in sewer_ids:
-                return (0, unique_ids.index(lid))
-            if lid in water_ids:
-                return (1, unique_ids.index(lid))
-            return (2, unique_ids.index(lid))
-
-        return [lid for lid in sorted(unique_ids, key=_key)]
-
-    def _allocate(amount: Decimal, line_ids: list[int]) -> None:
-        remaining_amt = Decimal(str(amount or 0))
-        for lid in line_ids:
-            if remaining_amt <= 0:
-                break
-            if lid not in line_totals:
-                continue
-            cap = max(line_totals[lid] - paid_by_line[lid], Decimal("0"))
-            if cap <= 0:
-                continue
-            take = min(cap, remaining_amt)
-            paid_by_line[lid] += take
-            remaining_amt -= take
-
-    default_order = sorted(line_totals.keys())
-    for app in apps:
-        amt = Decimal(str(app.amount_applied or 0))
-        if amt <= 0:
-            continue
-        selected_ids = _parse_selected_line_ids(getattr(app, "reference", None))
-        if selected_ids:
-            _allocate(amt, _normalize_selected_ids(selected_ids))
-        else:
-            _allocate(amt, default_order)
-
+    payment_map = build_invoice_line_payment_map(all_lines, apps)
     result: dict[int, dict] = {}
-    for lid, total in line_totals.items():
-        paid = money(paid_by_line.get(lid, Decimal("0")))
-        remaining = max(total - paid, Decimal("0"))
-        result[lid] = {
-            "meter_reading_id": line_reading_id_by_id.get(lid),
-            "description": line_desc_by_id.get(lid) or "",
+    for line in all_lines:
+        if line.id is None:
+            continue
+        line_id = int(line.id)
+        total = money(Decimal(str(line.amount_total or 0)))
+        state = payment_map.get(
+            line_id,
+            {"paid": Decimal("0"), "remaining": total},
+        )
+        result[line_id] = {
+            "meter_reading_id": int(line.meter_reading_id) if line.meter_reading_id is not None else None,
+            "description": line.description or "",
             "line_total": float(total),
-            "paid_amount": float(paid),
-            "remaining_amount": float(money(remaining)),
+            "paid_amount": float(state["paid"]),
+            "remaining_amount": float(state["remaining"]),
         }
     return result
 
@@ -620,67 +533,23 @@ class ReadingCreate(BaseModel):
     note: Optional[str] = None
 
 
-PHOTO_TTL_DAYS = 90
-PHOTO_COMPRESS_THRESHOLD_BYTES = int(os.getenv("METER_PHOTO_COMPRESS_THRESHOLD_BYTES", str(3 * 1024 * 1024)))
 PHOTO_TARGET_MAX_BYTES = int(os.getenv("METER_PHOTO_TARGET_MAX_BYTES", str(1 * 1024 * 1024)))
-PHOTO_JPEG_QUALITY_START = int(os.getenv("METER_PHOTO_JPEG_QUALITY_START", "85"))
-PHOTO_JPEG_QUALITY_MIN = int(os.getenv("METER_PHOTO_JPEG_QUALITY_MIN", "45"))
-PHOTO_JPEG_QUALITY_STEP = int(os.getenv("METER_PHOTO_JPEG_QUALITY_STEP", "10"))
+PHOTO_WEBP_QUALITY = int(os.getenv("METER_PHOTO_WEBP_QUALITY", "80"))
 
 
 def _compress_meter_photo_if_needed(raw_bytes: bytes, original_ext: str) -> tuple[bytes, str]:
-    """
-    Сжимает тяжёлые фото счётчиков.
-    Если файл маленький или сжать не удалось — возвращаем исходный файл как есть.
-    """
-    if len(raw_bytes) <= PHOTO_COMPRESS_THRESHOLD_BYTES:
-        return raw_bytes, original_ext
-
-    try:
-        with Image.open(BytesIO(raw_bytes)) as img:
-            normalized = ImageOps.exif_transpose(img)
-            if normalized.mode not in {"RGB", "L"}:
-                normalized = normalized.convert("RGB")
-            elif normalized.mode == "L":
-                normalized = normalized.convert("RGB")
-
-            best_bytes = raw_bytes
-            quality = max(PHOTO_JPEG_QUALITY_MIN, PHOTO_JPEG_QUALITY_START)
-
-            while quality >= PHOTO_JPEG_QUALITY_MIN:
-                out = BytesIO()
-                normalized.save(out, format="JPEG", quality=quality, optimize=True)
-                candidate = out.getvalue()
-
-                if len(candidate) < len(best_bytes):
-                    best_bytes = candidate
-                if len(candidate) <= PHOTO_TARGET_MAX_BYTES:
-                    return candidate, ".jpg"
-
-                quality -= max(1, PHOTO_JPEG_QUALITY_STEP)
-
-            if len(best_bytes) < len(raw_bytes):
-                return best_bytes, ".jpg"
-            return raw_bytes, original_ext
-    except (UnidentifiedImageError, OSError, ValueError):
-        return raw_bytes, original_ext
-
-
-def _photo_disk_path(photo: MeterReadingPhoto) -> str:
-    return os.path.join("uploads", photo.file_path)
-
-
-def cleanup_expired_meter_photos(db: Session) -> None:
-    now = datetime.utcnow()
-    expired = db.query(MeterReadingPhoto).filter(MeterReadingPhoto.expires_at <= now).all()
-    for photo in expired:
-        try:
-            path = _photo_disk_path(photo)
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
-        db.delete(photo)
+    """Normalize every uploaded meter photograph to a compact WebP."""
+    del original_ext  # Kept in the signature for compatibility with older callers/tests.
+    return (
+        image_to_webp(
+            raw_bytes,
+            max_dimension=2048,
+            quality=PHOTO_WEBP_QUALITY,
+            min_quality=50,
+            target_max_bytes=PHOTO_TARGET_MAX_BYTES,
+        ),
+        ".webp",
+    )
 
 
 def delete_meter_photo_for_reading(db: Session, reading_id: int) -> None:
@@ -1219,7 +1088,10 @@ def get_resident_meters(
 
         existing_photo_url = None
         if existing:
-            photo = db.query(MeterReadingPhoto).filter(MeterReadingPhoto.meter_reading_id == existing.id).first()
+            photo = db.query(MeterReadingPhoto).filter(
+                MeterReadingPhoto.meter_reading_id == existing.id,
+                MeterReadingPhoto.expires_at > datetime.utcnow(),
+            ).first()
             if photo:
                 normalized_photo_path = str(photo.file_path).replace("\\", "/")
                 existing_photo_url = f"/uploads/{normalized_photo_path}"
@@ -1340,7 +1212,10 @@ def upload_meter_photo(
     if len(raw_bytes) > IMAGE_MAX_UPLOAD_BYTES or not looks_like_image(raw_bytes):
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    processed_bytes, processed_ext = _compress_meter_photo_if_needed(raw_bytes, ext)
+    try:
+        processed_bytes, processed_ext = _compress_meter_photo_if_needed(raw_bytes, ext)
+    except ImageConversionError as exc:
+        raise HTTPException(status_code=400, detail="Invalid image file") from exc
     filename = f"{meter_id}_{reading.id}_{uuid4().hex}{processed_ext}"
     relative_path = os.path.join("meter_readings", filename)
     os.makedirs(os.path.join("uploads", "meter_readings"), exist_ok=True)
@@ -1349,7 +1224,8 @@ def upload_meter_photo(
     with open(full_path, "wb") as buffer:
         buffer.write(processed_bytes)
 
-    expires_at = datetime.utcnow() + timedelta(days=PHOTO_TTL_DAYS)
+    uploaded_at = datetime.utcnow()
+    expires_at = meter_photo_expiration(uploaded_at)
     existing = db.query(MeterReadingPhoto).filter(MeterReadingPhoto.meter_reading_id == reading.id).first()
     if existing:
         try:
@@ -1359,14 +1235,14 @@ def upload_meter_photo(
         except Exception:
             pass
         existing.file_path = relative_path.replace("\\", "/")
-        existing.created_at = datetime.utcnow()
+        existing.created_at = uploaded_at
         existing.expires_at = expires_at
         existing.created_by_id = user.id
     else:
         db.add(MeterReadingPhoto(
             meter_reading_id=reading.id,
             file_path=relative_path.replace("\\", "/"),
-            created_at=datetime.utcnow(),
+            created_at=uploaded_at,
             expires_at=expires_at,
             created_by_id=user.id,
         ))
@@ -1812,7 +1688,10 @@ def get_reading_history(
         photo_map = {}
         reading_ids = [rd.id for rd in readings]
         if reading_ids:
-            photos = db.query(MeterReadingPhoto).filter(MeterReadingPhoto.meter_reading_id.in_(reading_ids)).all()
+            photos = db.query(MeterReadingPhoto).filter(
+                MeterReadingPhoto.meter_reading_id.in_(reading_ids),
+                MeterReadingPhoto.expires_at > datetime.utcnow(),
+            ).all()
             photo_map = {
                 p.meter_reading_id: "/uploads/" + str(p.file_path).replace("\\", "/")
                 for p in photos

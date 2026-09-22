@@ -104,6 +104,20 @@ def session_matches_user(data: dict | None, user) -> bool:
     return int(data.get("sv", 0)) == int(getattr(user, "session_version", 0) or 0)
 
 
-def get_user_id_from_session(request: Request) -> int | None:
+def get_user_from_session(request: Request, db):
+    """Return the active user only when the signed session is still current.
+
+    Middleware and optional-auth handlers cannot always use the FastAPI
+    dependency, but they must still honor logout/password-reset revocation via
+    ``users.session_version``.
+    """
     data = get_session_data(request)
-    return data["user_id"] if data else None
+    if not data:
+        return None
+
+    from .models import User
+
+    user = db.get(User, data["user_id"])
+    if not user or not user.is_active or not session_matches_user(data, user):
+        return None
+    return user

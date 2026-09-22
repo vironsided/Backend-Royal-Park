@@ -13,4 +13,5 @@ argon2-cffi
 cryptography
 firebase-admin==6.7.0
 Pillow
+pillow-heif
 alembic

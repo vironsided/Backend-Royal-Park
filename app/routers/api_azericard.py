@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..database import get_db
-from ..models import Invoice, OnlineTransaction, Payment, PaymentApplication, PaymentLog, PaymentMethod, Resident, User, RoleEnum
+from ..models import Invoice, InvoiceLine, OnlineTransaction, Payment, PaymentApplication, PaymentLog, PaymentMethod, Resident, User, RoleEnum
 from ..deps import get_current_user, require_any_role
 
 _AZ_STAFF_ROLES = (RoleEnum.ROOT, RoleEnum.ADMIN, RoleEnum.OPERATOR, RoleEnum.SALES)
@@ -40,6 +40,10 @@ from ..services.azericard import (
     verify_callback_signature,
 )
 from .api_payment_logic import apply_payment_to_invoice, apply_payment_to_invoices
+from ..services.payment_line_allocation import (
+    build_invoice_line_payment_map,
+    normalize_selected_line_ids_for_water_sewer,
+)
 
 router = APIRouter(prefix="/api/azericard", tags=["azericard-api"])
 
@@ -48,6 +52,7 @@ class InitiateRequest(BaseModel):
     resident_id: int
     amount: Decimal
     invoice_id: Optional[int] = None
+    selected_line_ids: Optional[list[int]] = None
     description: Optional[str] = None
     saved_card_id: Optional[int] = None
     terminal_category: Optional[str] = None
@@ -193,6 +198,29 @@ def _payload_dict(raw_payload: Optional[str]) -> dict[str, str]:
     return {str(k): str(v) for k, v in parsed.items()}
 
 
+def _selected_line_ids_from_transaction(tx: OnlineTransaction) -> list[int]:
+    if not tx.request_payload:
+        return []
+    try:
+        payload = json.loads(tx.request_payload)
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    raw_ids = payload.get("_selected_line_ids")
+    if not isinstance(raw_ids, list):
+        return []
+    result: list[int] = []
+    for raw_id in raw_ids:
+        try:
+            line_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        if line_id > 0 and line_id not in result:
+            result.append(line_id)
+    return result
+
+
 def _terminal_group_for_transaction(tx: OnlineTransaction) -> str:
     # Post-auth operations must be sent via the same terminal as the original auth transaction.
     for raw_payload in (tx.callback_payload, tx.request_payload):
@@ -331,6 +359,7 @@ def initiate_payment(
             raise HTTPException(status_code=403, detail="Forbidden")
 
     invoice = None
+    selected_line_ids: list[int] = []
     if payload.invoice_id:
         invoice = db.get(Invoice, payload.invoice_id)
         if not invoice or invoice.resident_id != payload.resident_id:
@@ -343,6 +372,50 @@ def initiate_payment(
                 status_code=400,
                 detail=f"Amount {payload.amount} exceeds invoice remaining {remaining}",
             )
+
+        if payload.selected_line_ids:
+            lines = db.query(InvoiceLine).filter(InvoiceLine.invoice_id == invoice.id).all()
+            existing_ids = {int(line.id) for line in lines if line.id is not None}
+            requested_ids = []
+            for raw_id in payload.selected_line_ids:
+                try:
+                    line_id = int(raw_id)
+                except (TypeError, ValueError):
+                    continue
+                if line_id > 0 and line_id in existing_ids:
+                    requested_ids.append(line_id)
+            if not requested_ids:
+                raise HTTPException(status_code=400, detail="Некорректный выбор строк счёта")
+
+            descriptions = {
+                int(line.id): (line.description or "")
+                for line in lines
+                if line.id is not None
+            }
+            selected_line_ids = normalize_selected_line_ids_for_water_sewer(
+                requested_ids,
+                descriptions,
+            )
+            applications = db.query(PaymentApplication).filter(
+                PaymentApplication.invoice_id == invoice.id,
+            ).all()
+            payment_map = build_invoice_line_payment_map(lines, applications)
+            selected_remaining = sum(
+                (
+                    payment_map.get(line_id, {}).get("remaining", Decimal("0"))
+                    for line_id in selected_line_ids
+                ),
+                Decimal("0"),
+            )
+            if selected_remaining <= Decimal("0.0001"):
+                raise HTTPException(status_code=400, detail="Выбранные строки уже оплачены")
+            if payload.amount > selected_remaining:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Amount {payload.amount} exceeds selected lines remaining {selected_remaining}",
+                )
+    elif payload.selected_line_ids:
+        raise HTTPException(status_code=400, detail="selected_line_ids requires invoice_id")
 
     description = payload.description or f"Resident #{payload.resident_id}"
 
@@ -383,6 +456,10 @@ def initiate_payment(
         wallet_tavv=payload.wallet_tavv,
     )
 
+    stored_request_payload = dict(params)
+    if selected_line_ids:
+        stored_request_payload["_selected_line_ids"] = selected_line_ids
+
     tx = OnlineTransaction(
         resident_id=payload.resident_id,
         invoice_id=payload.invoice_id,
@@ -392,7 +469,7 @@ def initiate_payment(
         trtype=params.get("TRTYPE", "0"),
         terminal_category=category,
         gateway_status="INITIATED",
-        request_payload=json.dumps(params, ensure_ascii=False),
+        request_payload=json.dumps(stored_request_payload, ensure_ascii=False),
     )
     db.add(tx)
     db.commit()
@@ -556,20 +633,51 @@ def _confirm_local_transaction_from_callback(
     applied_amount = Decimal("0")
     auto_applied_count = 0
     if tx.invoice_id:
+        selected_line_ids = _selected_line_ids_from_transaction(tx)
+        application_reference = f"AZERICARD:{order_id}"
+        max_apply_amount = None
+        if selected_line_ids:
+            lines = db.query(InvoiceLine).filter(InvoiceLine.invoice_id == tx.invoice_id).all()
+            descriptions = {
+                int(line.id): (line.description or "")
+                for line in lines
+                if line.id is not None
+            }
+            selected_line_ids = normalize_selected_line_ids_for_water_sewer(
+                selected_line_ids,
+                descriptions,
+            )
+            applications = db.query(PaymentApplication).filter(
+                PaymentApplication.invoice_id == tx.invoice_id,
+            ).all()
+            payment_map = build_invoice_line_payment_map(lines, applications)
+            max_apply_amount = sum(
+                (
+                    payment_map.get(line_id, {}).get("remaining", Decimal("0"))
+                    for line_id in selected_line_ids
+                ),
+                Decimal("0"),
+            )
+            application_reference += "|LINESEL:" + ",".join(
+                str(line_id) for line_id in selected_line_ids
+            )
+
         applied_amount = apply_payment_to_invoice(
             db=db,
             payment_id=payment.id,
             invoice_id=tx.invoice_id,
-            reference=f"AZERICARD:{order_id}",
+            reference=application_reference,
+            max_amount=max_apply_amount,
         )
-        # For direct invoice payments, preserve existing behavior:
-        # distribute any payment leftover across other open invoices.
-        auto_applied_count = apply_payment_to_invoices(
-            db=db,
-            payment_id=payment.id,
-            resident_id=tx.resident_id,
-            scope="all",
-        )
+        if not selected_line_ids:
+            # Preserve legacy whole-invoice behavior only when no explicit
+            # line selection exists. A selected-line remainder stays advance.
+            auto_applied_count = apply_payment_to_invoices(
+                db=db,
+                payment_id=payment.id,
+                resident_id=tx.resident_id,
+                scope="all",
+            )
     # If invoice_id is empty, this is an advance top-up flow.
     # Keep the amount as resident advance (payment leftover) and do not auto-apply.
 
@@ -748,12 +856,10 @@ async def gateway_operation(payload: PostAuthOperationRequest, db: Session = Dep
 # ---------------------------------------------------------------------------
 
 @router.get("/saved-cards")
-def list_saved_cards(request: Request, db: Session = Depends(get_db)):
+def list_saved_cards(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """List saved cards for the currently authenticated user."""
     from ..models import SavedCard
-    user_id = _get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = user.id
 
     cards = (
         db.query(SavedCard)
@@ -776,12 +882,10 @@ def list_saved_cards(request: Request, db: Session = Depends(get_db)):
 
 
 @router.delete("/saved-cards/{card_id}")
-def delete_saved_card(card_id: int, request: Request, db: Session = Depends(get_db)):
+def delete_saved_card(card_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Delete a saved card belonging to the current user."""
     from ..models import SavedCard
-    user_id = _get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = user.id
 
     card = db.query(SavedCard).filter(SavedCard.id == card_id, SavedCard.user_id == user_id).first()
     if not card:
@@ -801,12 +905,10 @@ def delete_saved_card(card_id: int, request: Request, db: Session = Depends(get_
 
 
 @router.post("/saved-cards/{card_id}/set-default")
-def set_default_card(card_id: int, request: Request, db: Session = Depends(get_db)):
+def set_default_card(card_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Set a saved card as the default for the current user."""
     from ..models import SavedCard
-    user_id = _get_session_user_id(request)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+    user_id = user.id
 
     card = db.query(SavedCard).filter(SavedCard.id == card_id, SavedCard.user_id == user_id).first()
     if not card:
@@ -816,17 +918,6 @@ def set_default_card(card_id: int, request: Request, db: Session = Depends(get_d
     card.is_default = True
     db.commit()
     return {"ok": True}
-
-
-def _get_session_user_id(request: Request) -> Optional[int]:
-    """Extract user_id from the real signed session (cookie/bearer).
-
-    audit F-18: this previously read request.session (Starlette SessionMiddleware),
-    which login never populates — so saved-cards endpoints always returned 401 for
-    real users. Use the same session reader as the rest of the app.
-    """
-    from ..security import get_user_id_from_session
-    return get_user_id_from_session(request)
 
 
 @router.get("/success", response_class=HTMLResponse)

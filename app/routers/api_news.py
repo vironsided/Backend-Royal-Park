@@ -5,18 +5,19 @@ Supports multilingual content (ru, az, en)
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
 from datetime import datetime
 import json
 
 from ..database import get_db
 from ..models import News, User, RoleEnum
-from ..deps import get_current_user
+from ..deps import require_any_role
 from ..utils import create_news_notification
 
 
 router = APIRouter(prefix="/api/news", tags=["news-api"])
+news_admin = require_any_role(RoleEnum.ROOT, RoleEnum.ADMIN)
 
 
 class NewsTranslation(BaseModel):
@@ -28,8 +29,8 @@ class NewsTranslation(BaseModel):
 class NewsCreate(BaseModel):
     title: NewsTranslation
     content: NewsTranslation
-    icon: str = "info"
-    icon_color: str = "#667eea"
+    icon: Literal["info", "announcement", "star", "warning", "calendar", "tools"] = "info"
+    icon_color: str = Field(default="#667eea", pattern=r"^#[0-9A-Fa-f]{6}$")
     is_active: bool = True
     priority: int = 0
     published_at: Optional[str] = None  # Accept ISO string, convert to datetime
@@ -40,8 +41,8 @@ class NewsCreate(BaseModel):
 class NewsUpdate(BaseModel):
     title: Optional[NewsTranslation] = None
     content: Optional[NewsTranslation] = None
-    icon: Optional[str] = None
-    icon_color: Optional[str] = None
+    icon: Optional[Literal["info", "announcement", "star", "warning", "calendar", "tools"]] = None
+    icon_color: Optional[str] = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
     is_active: Optional[bool] = None
     priority: Optional[int] = None
     published_at: Optional[str] = None  # Accept ISO string
@@ -144,7 +145,7 @@ def get_public_news(
 @router.get("/admin", response_model=NewsListOut)
 def list_news_admin(
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(news_admin),
     page: int = Query(1, ge=1),
     per_page: int = Query(25, ge=1, le=100),
 ):
@@ -188,7 +189,7 @@ def list_news_admin(
 def create_news(
     payload: NewsCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(news_admin),
 ):
     """Create new news item."""
     # Convert ISO string dates to datetime objects
@@ -254,7 +255,7 @@ def create_news(
 def get_news_admin(
     news_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(news_admin),
 ):
     """Get news by ID for admin."""
     news = db.get(News, news_id)
@@ -293,7 +294,7 @@ def update_news(
     news_id: int,
     payload: NewsUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(news_admin),
 ):
     """Update news item."""
     news = db.get(News, news_id)
@@ -370,7 +371,7 @@ def update_news(
 def delete_news(
     news_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(news_admin),
 ):
     """Delete news item."""
     news = db.get(News, news_id)
