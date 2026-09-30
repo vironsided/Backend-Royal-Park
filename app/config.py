@@ -49,6 +49,11 @@ class Settings(BaseModel):
     AZERICARD_AUTH_TRTYPE: str = os.getenv("AZERICARD_AUTH_TRTYPE", "1")
     # Optional default TRAN_TRTYPE for TRTYPE=90 status inquiry (usually "1")
     AZERICARD_STATUS_TRAN_TRTYPE: str = os.getenv("AZERICARD_STATUS_TRAN_TRTYPE", "1")
+    # Wallet payments are opt-in. Keep disabled until Apple Pay / Google Pay
+    # terminals and the corresponding product flow are approved for production.
+    AZERICARD_WALLET_ENABLED: bool = os.getenv(
+        "AZERICARD_WALLET_ENABLED", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
 
     # AzeriCard — MPI public key (Azericard's key for callback verification)
     AZERICARD_MPI_PUBLIC_KEY: str = os.getenv("AZERICARD_MPI_PUBLIC_KEY", "")

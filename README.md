@@ -58,6 +58,11 @@ docker compose up --build
 - Для root смена не требуется по умолчанию.
 
 ## AzeriCard Apple Pay / Google Pay
+- Wallet-платежи по умолчанию отключены: `AZERICARD_WALLET_ENABLED=false`.
+  При этом `POST /api/azericard/initiate` отклоняет wallet-запросы с HTTP 403,
+  а обычная оплата банковской картой продолжает работать. Устанавливайте
+  `AZERICARD_WALLET_ENABLED=true` только после подключения терминалов и
+  проверки Apple Pay / Google Pay в production.
 - Для отдельного wallet-терминала заполните в `.env`:
   - `AZERICARD_TERMINAL_WALLET`
   - `AZERICARD_PRIVATE_KEY_WALLET`

@@ -89,6 +89,7 @@ class ReversalByOrderRequest(BaseModel):
 
 @router.get("/wallet-config")
 def wallet_config():
+    wallet_enabled = settings.AZERICARD_WALLET_ENABLED
     gpay_merchant_name = (settings.AZERICARD_GPAY_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
     apple_merchant_name = (settings.AZERICARD_APPLE_MERCHANT_NAME or settings.AZERICARD_MERCH_NAME or "").strip()
     apple_merchant_id = (
@@ -98,6 +99,7 @@ def wallet_config():
     ).strip()
     return {
         "ok": True,
+        "wallet_enabled": wallet_enabled,
         "google_pay": {
             "environment": (settings.AZERICARD_GPAY_ENVIRONMENT or "TEST").strip().upper(),
             "gateway": (settings.AZERICARD_GPAY_GATEWAY or "azericardgpay").strip(),
@@ -106,15 +108,35 @@ def wallet_config():
             "merchantName": gpay_merchant_name,
             "merchantOrigin": (settings.AZERICARD_MERCH_URL or "").strip(),
             "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
-            "supported": bool((settings.AZERICARD_GPAY_GATEWAY_MERCHANT_ID or "").strip()),
+            "supported": wallet_enabled
+            and bool((settings.AZERICARD_GPAY_GATEWAY_MERCHANT_ID or "").strip()),
         },
         "apple_pay": {
             "merchantIdentifier": apple_merchant_id,
             "merchantName": apple_merchant_name,
             "currencyCode": (settings.AZERICARD_CURRENCY or "AZN").strip().upper(),
-            "supported": bool(apple_merchant_id),
+            "supported": wallet_enabled and bool(apple_merchant_id),
         },
     }
+
+
+def _is_wallet_request(payload: InitiateRequest) -> bool:
+    requested_group = (payload.terminal_group or "").strip().lower()
+    wallet_provider = (payload.wallet_provider or "").strip().lower()
+    has_wallet_data = any(
+        (value or "").strip()
+        for value in (payload.wallet_token, payload.wallet_eci, payload.wallet_tavv)
+    )
+    return (
+        requested_group == TERMINAL_GROUP_WALLET
+        or wallet_provider in {"google_pay", "apple_pay"}
+        or has_wallet_data
+    )
+
+
+def _ensure_wallet_request_allowed(payload: InitiateRequest) -> None:
+    if _is_wallet_request(payload) and not settings.AZERICARD_WALLET_ENABLED:
+        raise HTTPException(status_code=403, detail="Wallet payments are disabled")
 
 
 def _ensure_gateway_config(category: Optional[str] = None, terminal_group: Optional[str] = None) -> None:
@@ -346,6 +368,11 @@ def initiate_payment(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # UI visibility is not a security boundary. Reject wallet initiation on the
+    # server as well, while leaving callbacks/status/refunds for old wallet
+    # transactions operational.
+    _ensure_wallet_request_allowed(payload)
+
     resident = db.get(Resident, payload.resident_id)
     if not resident:
         raise HTTPException(status_code=404, detail="Resident not found")
